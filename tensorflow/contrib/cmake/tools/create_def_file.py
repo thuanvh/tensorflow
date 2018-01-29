@@ -125,7 +125,8 @@ def main():
     # Header for the def file.
     def_fp.write("LIBRARY " + args.target + "\n")
     def_fp.write("EXPORTS\n")
-    def_fp.write("\t ??1OpDef@tensorflow@@UEAA@XZ\n")
+    #def_fp.write("\t ??1OpDef@tensorflow@@UEAA@XZ\n")
+    def_fp.write("\t ??1OpDef@tensorflow@@UAE@XZ\n")
 
     # Each symbols returned by undname matches the same position in candidates.
     # We compare on undname but use the decorated name from candidates.

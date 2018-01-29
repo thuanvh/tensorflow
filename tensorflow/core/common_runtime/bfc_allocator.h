@@ -365,10 +365,11 @@ class BFCAllocator : public VisitableAllocator {
   inline int Log2FloorNonZero(uint64 n) {
 #if defined(__GNUC__)
     return 63 ^ __builtin_clzll(n);
-#elif defined(PLATFORM_WINDOWS)
+/*#elif defined(PLATFORM_WINDOWS)
     unsigned long index;
     _BitScanReverse64(&index, n);
     return index;
+	*///Thuan
 #else
     int r = 0;
     while (n > 0) {
