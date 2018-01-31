@@ -26,6 +26,11 @@ tf_core_kernels.vcxproj change VC++ Directories from
 to
 ```$(VC_ExecutablePath_x64_x86);```
 
+- Run build
+```
+"C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\MSBuild\15.0\Bin\amd64\MSBuild.exe" /m:1 /p:CL_MPCount=1 /p:Configuration=Release /p:Platform=win32 /p:PreferredToolArchitecture=win32 tensorflow.vcxproj
+```
+
 <div align="center">
   <img src="https://www.tensorflow.org/images/tf_logo_transp.png"><br><br>
 </div>
