@@ -70,23 +70,6 @@ ProcessFunctionLibraryRuntime::ProcessFunctionLibraryRuntime(
   }
 }
 
-ProcessFunctionLibraryRuntime::ProcessFunctionLibraryRuntime(
-    const DeviceMgr* device_mgr, Env* env, int graph_def_version,
-    const FunctionLibraryDefinition* lib_def,
-    const OptimizerOptions& optimizer_options)
-    : ProcessFunctionLibraryRuntime(device_mgr, env, graph_def_version, lib_def,
-                                    optimizer_options,
-                                    nullptr /* cluster_flr */) {}
-
-ProcessFunctionLibraryRuntime::ProcessFunctionLibraryRuntime(
-    const DeviceMgr* device_mgr, Env* env, int graph_def_version,
-    const FunctionLibraryDefinition* lib_def,
-    const OptimizerOptions& optimizer_options,
-    CustomKernelCreator custom_kernel_creator)
-    : ProcessFunctionLibraryRuntime(
-          device_mgr, env, graph_def_version, lib_def, optimizer_options,
-          std::move(custom_kernel_creator), nullptr /* cluster_flr */) {}
-
 /* static */
 Status ProcessFunctionLibraryRuntime::SendTensors(
     const string& source_device, const string& target_device,
@@ -162,7 +145,7 @@ FunctionLibraryRuntime* ProcessFunctionLibraryRuntime::GetFLR(
   Device* device = nullptr;
   if (device_name != kDefaultFLRDevice) {
     if (!device_mgr_->LookupDevice(device_name, &device).ok()) {
-      LOG(ERROR) << "Could not find device: " << device_name;
+      VLOG(1) << "Could not find device: " << device_name;
       return nullptr;
     }
   }
@@ -263,7 +246,7 @@ Status ProcessFunctionLibraryRuntime::ReleaseHandle(
   string target_device;
   {
     mutex_lock l(mu_);
-    CHECK_EQ(1, function_data_.count(handle));
+    CHECK_EQ(1, function_data_.count(handle)) << " handle: " << handle;
     target_device = function_data_[handle].target_device;
   }
   flr = GetFLR(target_device);

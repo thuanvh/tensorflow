@@ -509,7 +509,7 @@ Status WindowsFileSystem::Stat(const string& fname, FileStatistics* stat) {
   } else {
     stat->mtime_nsec = sbuf.st_mtime * 1e9;
     stat->length = sbuf.st_size;
-    stat->is_directory = PathIsDirectoryW(ws_translated_fname.c_str());
+    stat->is_directory = false;//Thuan PathIsDirectoryW(ws_translated_fname.c_str());
   }
   return result;
 }

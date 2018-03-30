@@ -73,7 +73,8 @@ class WindowsEnv : public Env {
   bool MatchPath(const string& path, const string& pattern) override {
     std::wstring ws_path(WindowsFileSystem::Utf8ToWideChar(path));
     std::wstring ws_pattern(WindowsFileSystem::Utf8ToWideChar(pattern));
-    return PathMatchSpecW(ws_path.c_str(), ws_pattern.c_str()) == TRUE;
+    //Thuan return PathMatchSpecW(ws_path.c_str(), ws_pattern.c_str()) == TRUE;
+	return false;
   }
 
   void SleepForMicroseconds(int64 micros) override { Sleep(micros / 1000); }
