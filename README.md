@@ -27,8 +27,13 @@ to
 ```$(VC_ExecutablePath_x64_x86);```
 
 - Run build
+Build with one thread 
 ```
 "C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\MSBuild\15.0\Bin\amd64\MSBuild.exe" /m:1 /p:CL_MPCount=1 /p:Configuration=Release /p:Platform=win32 /p:PreferredToolArchitecture=win32 tensorflow.vcxproj
+```
+Build with all cpu
+```
+"C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\MSBuild\15.0\Bin\amd64\MSBuild.exe" /p:Configuration=Release /p:Platform=win32 /p:PreferredToolArchitecture=win32 tensorflow.vcxproj
 ```
 - Install
 ```
