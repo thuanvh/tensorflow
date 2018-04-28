@@ -179,6 +179,8 @@ class WindowsEnv : public Env {
   }
 
  private:
+  void GetLocalTempDirectories(std::vector<string>* list) override;
+
   typedef VOID(WINAPI* FnGetSystemTimePreciseAsFileTime)(LPFILETIME);
   FnGetSystemTimePreciseAsFileTime GetSystemTimePreciseAsFileTime_;
 };
@@ -193,7 +195,7 @@ Env* Env::Default() {
   return default_env;
 }
 
-void Env::GetLocalTempDirectories(std::vector<string>* list) {
+void WindowsEnv::GetLocalTempDirectories(std::vector<string>* list) {
   list->clear();
   // On windows we'll try to find a directory in this order:
   //   C:/Documents & Settings/whomever/TEMP (or whatever GetTempPath() is)

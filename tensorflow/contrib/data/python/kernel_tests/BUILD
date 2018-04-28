@@ -4,7 +4,7 @@ licenses(["notice"])  # Apache 2.0
 
 exports_files(["LICENSE"])
 
-load("//tensorflow:tensorflow.bzl", "py_test", "tf_py_test")
+load("//tensorflow:tensorflow.bzl", "cuda_py_test", "py_test", "tf_py_test")
 
 py_test(
     name = "batch_dataset_op_test",
@@ -22,6 +22,7 @@ py_test(
         "//tensorflow/python:dtypes",
         "//tensorflow/python:errors",
         "//tensorflow/python:math_ops",
+        "//tensorflow/python:script_ops",
         "//tensorflow/python:sparse_tensor",
         "//tensorflow/python:string_ops",
         "//tensorflow/python:tensor_shape",
@@ -168,10 +169,10 @@ py_test(
     srcs = ["interleave_dataset_op_test.py"],
     srcs_version = "PY2AND3",
     tags = [
-        "no_cuda_on_cpu_tap",
+        "manual",
         "no_oss",
         "no_pip",
-        "nomsan",
+        "notap",
     ],
     deps = [
         ":dataset_serialization_test",
@@ -472,16 +473,11 @@ py_test(
     ],
 )
 
-py_test(
+cuda_py_test(
     name = "prefetching_ops_test",
     size = "small",
     srcs = ["prefetching_ops_test.py"],
-    srcs_version = "PY2AND3",
-    tags = [
-        "manual",
-        "no_oss",  # b/68785503
-    ],
-    deps = [
+    additional_deps = [
         "//tensorflow/contrib/data/python/ops:prefetching_ops",
         "//tensorflow/core:protos_all_py",
         "//tensorflow/python:client_testlib",
@@ -511,18 +507,4 @@ tf_py_test(
         "//tensorflow/python:sparse_tensor",
         "//third_party/py/numpy",
     ],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        include = [
-            "**/*",
-        ],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
 )

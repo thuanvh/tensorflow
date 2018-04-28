@@ -266,7 +266,7 @@ class Model(Network):
     # initialization for Eager mode execution
     if context.executing_eagerly():
       if target_tensors is not None:
-        raise ValueError('target_tensors are not currently supported in Eager'
+        raise ValueError('target_tensors are not currently supported in Eager '
                          'mode.')
       self.total_loss = None
       self.metrics_tensors = []
@@ -276,6 +276,8 @@ class Model(Network):
           self.metrics_names.append(self.output_names[i] + '_loss')
       self.nested_metrics = training_utils.collect_metrics(metrics,
                                                            self.output_names)
+      with K.name_scope('metrics'):
+        training_utils.populate_metric_names(self)
       self._feed_sample_weight_modes = []
       for i in range(len(self.outputs)):
         self._feed_sample_weight_modes.append(None)
@@ -462,7 +464,6 @@ class Model(Network):
         output_weighted_metrics = nested_weighted_metrics[i]
 
         def handle_metrics(metrics, weights=None):
-          metric_name_prefix = 'weighted_' if weights is not None else ''
 
           for metric in metrics:
             if metric in ('accuracy', 'acc', 'crossentropy', 'ce'):
@@ -489,39 +490,19 @@ class Model(Network):
                   metric_fn = metrics_module.categorical_accuracy
                 elif metric in ('crossentropy', 'ce'):
                   metric_fn = metrics_module.categorical_crossentropy
-              if metric in ('accuracy', 'acc'):
-                suffix = 'acc'
-              elif metric in ('crossentropy', 'ce'):
-                suffix = 'ce'
               weighted_metric_fn = training_utils.weighted_masked_objective(
                   metric_fn)
-              metric_name = metric_name_prefix + suffix
             else:
               metric_fn = metrics_module.get(metric)
               weighted_metric_fn = training_utils.weighted_masked_objective(
                   metric_fn)
-              # Get metric name as string
-              if hasattr(metric_fn, 'name'):
-                metric_name = metric_fn.name
-              else:
-                metric_name = metric_fn.__name__
-              metric_name = metric_name_prefix + metric_name
-
+            metric_name = training_utils.get_base_metric_name(
+                metric, weighted=weights is not None)
             with K.name_scope(metric_name):
               metric_result = weighted_metric_fn(
                   y_true, y_pred, weights=weights, mask=masks[i])
 
-            # Append to self.metrics_names, self.metric_tensors,
-            # self.stateful_metric_names
-            if len(self.output_names) > 1:
-              metric_name = '%s_%s' % (self.output_names[i], metric_name)
-            # Dedupe name
-            j = 1
-            base_metric_name = metric_name
-            while metric_name in self.metrics_names:
-              metric_name = '%s_%d' % (base_metric_name, j)
-              j += 1
-            self.metrics_names.append(metric_name)
+            training_utils.add_metric_name(self, metric_name, i)
             self.metrics_tensors.append(metric_result)
 
             # Keep track of state updates created by
@@ -874,7 +855,19 @@ class Model(Network):
         whether to build the model's graph in inference mode (False), training
         mode (True), or using the Keras learning phase (None).
     """
-    if context.executing_eagerly():
+    if not getattr(self, '_uses_inputs_arg', True):
+      raise NotImplementedError(
+          'Subclassed Models without "inputs" in their call() signatures do '
+          'not yet support shape inference. File a feature request if this '
+          'limitation bothers you.')
+    if self.__class__.__name__ == 'Sequential':
+      # Note: we can't test whether the model is `Sequential` via `isinstance`
+      # since `Sequential` depends on `Model`.
+      if isinstance(inputs, list):
+        assert len(inputs) == 1
+        inputs = inputs[0]
+      self.build(input_shape=(None,) + inputs.shape[1:])
+    elif context.executing_eagerly():
       self._eager_set_inputs(inputs)
     else:
       self._symbolic_set_inputs(inputs, training=training)
@@ -1169,6 +1162,9 @@ class Model(Network):
           batch_size=batch_size)
 
     elif validation_split and 0. < validation_split < 1.:
+      if training_utils.has_symbolic_tensors(x):
+        raise ValueError('If your data is in the form of symbolic tensors, '
+                         'you cannot use `validation_split`.')
       if hasattr(x[0], 'shape'):
         split_at = int(x[0].shape[0] * (1. - validation_split))
       else:
@@ -1542,20 +1538,19 @@ class Model(Network):
         max_queue_size: Integer. Maximum size for the generator queue.
             If unspecified, `max_queue_size` will default to 10.
         workers: Integer. Maximum number of processes to spin up
-            when using process based threading.
+            when using process-based threading.
             If unspecified, `workers` will default to 1. If 0, will
             execute the generator on the main thread.
-        use_multiprocessing: Boolean. If True, use process based threading.
-            If unspecified, `workers` will default to False.
-            Note that because
-            this implementation relies on multiprocessing,
-            you should not pass
-            non picklable arguments to the generator
-            as they can't be passed
-            easily to children processes.
-        shuffle: Whether to shuffle the order of the batches at
+        use_multiprocessing: Boolean.
+            If `True`, use process-based threading.
+            If unspecified, `use_multiprocessing` will default to `False`.
+            Note that because this implementation relies on multiprocessing,
+            you should not pass non-picklable arguments to the generator
+            as they can't be passed easily to children processes.
+        shuffle: Boolean. Whether to shuffle the order of the batches at
             the beginning of each epoch. Only used with instances
-            of `Sequence` (keras.utils.Sequence).
+            of `Sequence` (`keras.utils.Sequence`).
+            Has no effect when `steps_per_epoch` is not `None`.
         initial_epoch: Epoch at which to start training
             (useful for resuming a previous training run)
 
@@ -1582,9 +1577,9 @@ class Model(Network):
         ValueError: In case the generator yields
             data in an invalid format.
     """
-    if not self._is_graph_network:
+    if not self.built and not self._is_graph_network:
       raise NotImplementedError(
-          '`fit_generator` is not yet enabled for Model subclasses')
+          '`fit_generator` is not yet enabled for unbuilt Model subclasses')
 
     return training_generator.fit_generator(
         self,
@@ -1625,16 +1620,15 @@ class Model(Network):
             the `len(generator)` as a number of steps.
         max_queue_size: maximum size for the generator queue
         workers: Integer. Maximum number of processes to spin up
-            when using process based threading.
+            when using process-based threading.
             If unspecified, `workers` will default to 1. If 0, will
             execute the generator on the main thread.
-        use_multiprocessing: if True, use process based threading.
-            Note that because
-            this implementation relies on multiprocessing,
-            you should not pass
-            non picklable arguments to the generator
-            as they can't be passed
-            easily to children processes.
+        use_multiprocessing: Boolean.
+            If `True`, use process-based threading.
+            If unspecified, `use_multiprocessing` will default to `False`.
+            Note that because this implementation relies on multiprocessing,
+            you should not pass non-picklable arguments to the generator
+            as they can't be passed easily to children processes.
 
     Returns:
         Scalar test loss (if the model has a single output and no metrics)
@@ -1649,9 +1643,10 @@ class Model(Network):
         ValueError: In case the generator yields
             data in an invalid format.
     """
-    if not self._is_graph_network:
+    if not self.built and not self._is_graph_network:
       raise NotImplementedError(
-          '`evaluate_generator` is not yet enabled for Model subclasses')
+          '`evaluate_generator` is not yet enabled for '
+          'unbuilt Model subclasses')
 
     return training_generator.evaluate_generator(
         self,
@@ -1684,16 +1679,15 @@ class Model(Network):
             the `len(generator)` as a number of steps.
         max_queue_size: Maximum size for the generator queue.
         workers: Integer. Maximum number of processes to spin up
-            when using process based threading.
+            when using process-based threading.
             If unspecified, `workers` will default to 1. If 0, will
             execute the generator on the main thread.
-        use_multiprocessing: If `True`, use process based threading.
-            Note that because
-            this implementation relies on multiprocessing,
-            you should not pass
-            non picklable arguments to the generator
-            as they can't be passed
-            easily to children processes.
+        use_multiprocessing: Boolean.
+            If `True`, use process-based threading.
+            If unspecified, `use_multiprocessing` will default to `False`.
+            Note that because this implementation relies on multiprocessing,
+            you should not pass non-picklable arguments to the generator
+            as they can't be passed easily to children processes.
         verbose: verbosity mode, 0 or 1.
 
     Returns:
@@ -1703,9 +1697,9 @@ class Model(Network):
         ValueError: In case the generator yields
             data in an invalid format.
     """
-    if not self._is_graph_network:
+    if not self.built and not self._is_graph_network:
       raise NotImplementedError(
-          '`predict_generator` is not yet enabled for Model subclasses')
+          '`predict_generator` is not yet enabled for unbuilt Model subclasses')
 
     return training_generator.predict_generator(
         self,
