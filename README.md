@@ -35,9 +35,17 @@ Build with all cpu
 ```
 "C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\MSBuild\15.0\Bin\amd64\MSBuild.exe" /p:Configuration=Release /p:Platform=win32 /p:PreferredToolArchitecture=win32 tensorflow.vcxproj
 ```
+Build cmake
+```
+cmake --build . --config Release
+```
 - Install
 ```
 cmake -DBUILD_TYPE=Release -P cmake_install.cmake
+```
+or
+```
+cmake --build . --config Release --target Install
 ```
 
 <div align="center">
