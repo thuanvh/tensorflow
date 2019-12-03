@@ -75,9 +75,6 @@ class TextFileLineIterator
   Status Init(const string& filename, int64 vocab_size, char delimiter,
               DataType key_dtype, int64 key_index, DataType value_dtype,
               int64 value_index, Env* env) {
-    if (vocab_size == -1) {
-      TF_RETURN_IF_ERROR(GetNumLinesInTextFile(env, filename, &vocab_size));
-    }
     filename_ = filename;
     vocab_size_ = vocab_size;
     delimiter_ = delimiter;
@@ -85,6 +82,7 @@ class TextFileLineIterator
     value_ = Tensor(value_dtype, TensorShape({}));
     key_index_ = key_index;
     value_index_ = value_index;
+    env_ = env;
 
     status_ = env->NewRandomAccessFile(filename_, &file_);
     if (!status_.ok()) return status_;
@@ -103,7 +101,8 @@ class TextFileLineIterator
     string line;
     status_ = input_buffer_->ReadLine(&line);
     if (!status_.ok()) {
-      if (errors::IsOutOfRange(status_) && next_id_ != vocab_size_) {
+      if (errors::IsOutOfRange(status_) && vocab_size_ != -1 &&
+          next_id_ != vocab_size_) {
         status_ = errors::InvalidArgument("Invalid vocab_size in ", filename_,
                                           ": expected ", vocab_size_,
                                           " but got ", next_id_);
@@ -111,7 +110,7 @@ class TextFileLineIterator
       valid_ = false;
       return;
     }
-    if (next_id_ >= vocab_size_) {
+    if (vocab_size_ != -1 && next_id_ >= vocab_size_) {
       LOG(WARNING) << "Truncated " << filename_ << " before its end at "
                    << vocab_size_ << " records.";
       LOG(WARNING) << "next_id_  : " << next_id_;
@@ -162,7 +161,18 @@ class TextFileLineIterator
 
   Status status() const override { return status_; }
 
-  int64 total_size() const override { return vocab_size_; }
+  int64 total_size() const override {
+    if (vocab_size_ == -1) {
+      int64 new_size = -1;
+      Status status = GetNumLinesInTextFile(env_, filename_, &new_size);
+      if (!status.ok()) {
+        LOG(WARNING) << "Unable to get line count: " << status;
+        new_size = -1;
+      }
+      *const_cast<int64*>(&vocab_size_) = new_size;
+    }
+    return vocab_size_;
+  }
 
  private:
   Tensor key_;
@@ -170,6 +180,7 @@ class TextFileLineIterator
   bool valid_;  // true if the iterator points to an existing range.
   int64 key_index_;
   int64 value_index_;
+  Env* env_;
   int64 next_id_;
   int64 vocab_size_;
   string filename_;
@@ -227,11 +238,12 @@ class TextFileLineIterator
         tensor->flat<double>()(0) = value;
       } break;
       case DT_STRING:
-        tensor->flat<string>()(0) = token;
+        tensor->flat<tstring>()(0) = token;
         break;
       default:
         valid_ = false;
-        return errors::InvalidArgument("Data type ", dtype, " not supported.");
+        return errors::InvalidArgument("Data type ", DataTypeString(dtype),
+                                       " not supported.");
     }
     return Status::OK();
   }
@@ -239,7 +251,7 @@ class TextFileLineIterator
   TF_DISALLOW_COPY_AND_ASSIGN(TextFileLineIterator);
 };
 
-Status GetTableHandle(const string& input_name, OpKernelContext* ctx,
+Status GetTableHandle(StringPiece input_name, OpKernelContext* ctx,
                       string* container, string* table_handle) {
   {
     mutex* mu;
@@ -252,7 +264,7 @@ Status GetTableHandle(const string& input_name, OpKernelContext* ctx,
           "Lookup table handle must be scalar, but had shape: ",
           tensor.shape().DebugString());
     }
-    auto h = tensor.flat<string>();
+    auto h = tensor.flat<tstring>();
     *container = h(0);
     *table_handle = h(1);
   }
@@ -261,25 +273,35 @@ Status GetTableHandle(const string& input_name, OpKernelContext* ctx,
 
 }  // namespace
 
-Status GetLookupTable(const string& input_name, OpKernelContext* ctx,
-                      LookupInterface** table) {
+Status GetResourceLookupTable(StringPiece input_name, OpKernelContext* ctx,
+                              LookupInterface** table) {
+  const Tensor* handle_tensor;
+  TF_RETURN_IF_ERROR(ctx->input(input_name, &handle_tensor));
+  const ResourceHandle& handle = handle_tensor->scalar<ResourceHandle>()();
+  return LookupResource(ctx, handle, table);
+}
+
+Status GetReferenceLookupTable(StringPiece input_name, OpKernelContext* ctx,
+                               LookupInterface** table) {
   string container;
   string table_handle;
+  TF_RETURN_IF_ERROR(
+      GetTableHandle(input_name, ctx, &container, &table_handle));
+  return ctx->resource_manager()->Lookup(container, table_handle, table);
+}
+
+Status GetLookupTable(StringPiece input_name, OpKernelContext* ctx,
+                      LookupInterface** table) {
   DataType handle_dtype;
   TF_RETURN_IF_ERROR(ctx->input_dtype(input_name, &handle_dtype));
   if (handle_dtype == DT_RESOURCE) {
-    ResourceHandle handle;
-    TF_RETURN_IF_ERROR(HandleFromInput(ctx, input_name, &handle));
-    return LookupResource(ctx, handle, table);
+    return GetResourceLookupTable(input_name, ctx, table);
   } else {
-    TF_RETURN_IF_ERROR(
-        GetTableHandle(input_name, ctx, &container, &table_handle));
-    return ctx->resource_manager()->Lookup(container, table_handle, table);
+    return GetReferenceLookupTable(input_name, ctx, table);
   }
 }
 
-Status GetInitializableLookupTable(const string& input_name,
-                                   OpKernelContext* ctx,
+Status GetInitializableLookupTable(StringPiece input_name, OpKernelContext* ctx,
                                    InitializableLookupTable** table) {
   LookupInterface* lookup_table;
   DataType handle_dtype;
@@ -315,8 +337,10 @@ Status CheckTableDataTypes(const LookupInterface& table, DataType key_dtype,
                            DataType value_dtype, const string& table_name) {
   if (table.key_dtype() != key_dtype || table.value_dtype() != value_dtype) {
     return errors::InvalidArgument(
-        "Conflicting key/value dtypes ", key_dtype, "->", value_dtype, " with ",
-        table.key_dtype(), "-", table.value_dtype(), " for table ", table_name);
+        "Conflicting key/value dtypes ", DataTypeString(key_dtype), "->",
+        DataTypeString(value_dtype), " with ",
+        DataTypeString(table.key_dtype()), "-",
+        DataTypeString(table.value_dtype()), " for table ", table_name);
   }
   return Status::OK();
 }
@@ -329,7 +353,7 @@ Status InitializeTableFromTextFile(const string& filename, int64 vocab_size,
   if (key_index == kLineNumber && table->key_dtype() != DT_INT64) {
     return errors::InvalidArgument(
         "Key index for line number requires table key dtype of int64, got ",
-        table->key_dtype());
+        DataTypeString(table->key_dtype()));
   }
   const DataType& key_dtype = table->key_dtype();
   const DataType& value_dtype = table->value_dtype();
@@ -337,17 +361,17 @@ Status InitializeTableFromTextFile(const string& filename, int64 vocab_size,
       key_dtype != DT_STRING) {
     return errors::InvalidArgument(
         "Key index for whole line requires string or integer table key, got ",
-        table->key_dtype());
+        DataTypeString(table->key_dtype()));
   }
   if (value_index == kLineNumber && value_dtype != DT_INT64) {
     return errors::InvalidArgument(
         "Value index for line number requires table value dtype of int64, got ",
-        table->value_dtype());
+        DataTypeString(table->value_dtype()));
   }
   if (value_index == kWholeLine && value_dtype != DT_STRING) {
     return errors::InvalidArgument(
         "Value index for whole line requires table value dtype of string, got ",
-        table->value_dtype());
+        DataTypeString(table->value_dtype()));
   }
 
   TextFileLineIterator iter;

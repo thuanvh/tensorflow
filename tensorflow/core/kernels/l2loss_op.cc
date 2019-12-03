@@ -17,8 +17,8 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/kernels/l2loss_op.h"
+#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -55,6 +55,11 @@ class L2LossOp<CPUDevice, T> : public OpKernel {
 REGISTER_KERNEL(float);
 REGISTER_KERNEL(double);
 REGISTER_KERNEL(Eigen::half);
+#ifdef ENABLE_INTEL_MKL_BFLOAT16
+// Since Eigen backend does not support bfloat16 ops, we are selectively
+// enabling them for MKL backend.
+REGISTER_KERNEL(bfloat16);
+#endif
 #undef REGISTER_KERNEL
 
 }  // namespace tensorflow

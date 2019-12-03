@@ -21,6 +21,8 @@ from __future__ import print_function
 import os
 import traceback
 
+import grpc
+
 from tensorflow.core.debug import debug_service_pb2
 from tensorflow.python.client import session
 from tensorflow.python.debug.lib import grpc_debug_test_server
@@ -33,6 +35,7 @@ from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import resource_variable_ops  # pylint: disable=unused-import
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import googletest
+from tensorflow.python.platform import test
 from tensorflow.python.util import tf_inspect
 
 
@@ -47,7 +50,8 @@ class SendTracebacksTest(test_util.TensorFlowTestCase):
     test_util.TensorFlowTestCase.setUpClass()
     (cls._server_port, cls._debug_server_url, cls._server_dump_dir,
      cls._server_thread,
-     cls._server) = grpc_debug_test_server.start_server_on_separate_thread()
+     cls._server) = grpc_debug_test_server.start_server_on_separate_thread(
+         poll_server=True)
     cls._server_address = "localhost:%d" % cls._server_port
     (cls._server_port_2, cls._debug_server_url_2, cls._server_dump_dir_2,
      cls._server_thread_2,
@@ -73,7 +77,7 @@ class SendTracebacksTest(test_util.TensorFlowTestCase):
   def _findFirstTraceInsideTensorFlowPyLibrary(self, op):
     """Find the first trace of an op that belongs to the TF Python library."""
     for trace in op.traceback:
-      if source_utils.guess_is_tensorflow_py_library(trace[0]):
+      if source_utils.guess_is_tensorflow_py_library(trace.filename):
         return trace
 
   def testSendGraphTracebacksToSingleDebugServer(self):
@@ -106,7 +110,8 @@ class SendTracebacksTest(test_util.TensorFlowTestCase):
           "      a = variables.Variable(21.0, name=\"a\")",
           self._server.query_source_file_line(__file__, a_lineno))
       # Files in the TensorFlow code base shouldn not have been sent.
-      tf_trace_file_path = self._findFirstTraceInsideTensorFlowPyLibrary(a.op)
+      tf_trace = self._findFirstTraceInsideTensorFlowPyLibrary(a.op)
+      tf_trace_file_path = tf_trace.filename
       with self.assertRaises(ValueError):
         self._server.query_source_file_line(tf_trace_file_path, 0)
       self.assertEqual([debug_service_pb2.CallTraceback.GRAPH_EXECUTION],
@@ -127,9 +132,17 @@ class SendTracebacksTest(test_util.TensorFlowTestCase):
 
       send_traceback = traceback.extract_stack()
       send_lineno = line_number_above()
-      source_remote.send_graph_tracebacks(
-          [self._server_address, self._server_address_2],
-          "dummy_run_key", send_traceback, sess.graph)
+
+      with test.mock.patch.object(
+          grpc, "insecure_channel",
+          wraps=grpc.insecure_channel) as mock_grpc_channel:
+        source_remote.send_graph_tracebacks(
+            [self._server_address, self._server_address_2],
+            "dummy_run_key", send_traceback, sess.graph)
+        mock_grpc_channel.assert_called_with(
+            test.mock.ANY,
+            options=[("grpc.max_receive_message_length", -1),
+                     ("grpc.max_send_message_length", -1)])
 
       servers = [self._server, self._server_2]
       for server in servers:
@@ -147,7 +160,8 @@ class SendTracebacksTest(test_util.TensorFlowTestCase):
         self.assertEqual(
             "      x = math_ops.add(a, b, name=\"two/x\")",
             server.query_source_file_line(__file__, x_lineno))
-        tf_trace_file_path = self._findFirstTraceInsideTensorFlowPyLibrary(x.op)
+        tf_trace = self._findFirstTraceInsideTensorFlowPyLibrary(a.op)
+        tf_trace_file_path = tf_trace.filename
         with self.assertRaises(ValueError):
           server.query_source_file_line(tf_trace_file_path, 0)
         self.assertEqual([debug_service_pb2.CallTraceback.GRAPH_EXECUTION],
@@ -165,6 +179,20 @@ class SendTracebacksTest(test_util.TensorFlowTestCase):
                      self._server.query_call_types())
     self.assertIn((self._curr_file_path, send_lineno, this_func_name),
                   self._server.query_origin_stack()[-1])
+
+  def testGRPCServerMessageSizeLimit(self):
+    """Assert gRPC debug server is started with unlimited message size."""
+    with test.mock.patch.object(
+        grpc, "server", wraps=grpc.server) as mock_grpc_server:
+      (_, _, _, server_thread,
+       server) = grpc_debug_test_server.start_server_on_separate_thread(
+           poll_server=True)
+      mock_grpc_server.assert_called_with(
+          test.mock.ANY,
+          options=[("grpc.max_receive_message_length", -1),
+                   ("grpc.max_send_message_length", -1)])
+    server.stop_server().wait()
+    server_thread.join()
 
 
 if __name__ == "__main__":

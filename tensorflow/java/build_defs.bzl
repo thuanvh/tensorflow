@@ -1,5 +1,3 @@
-# -*- Python -*-
-
 # Pin to Java 1.7 to ensure broader compatibility for the Java bindings on
 # Android. Note also that the android_library bazel rule currently enforces
 # java 7
@@ -15,9 +13,10 @@ JAVA_VERSION_OPTS = [
 XLINT_OPTS = [
     "-Werror",
     "-Xlint:all",
+    "-Xlint:-processing",
     "-Xlint:-serial",
     "-Xlint:-try",
-    "-Xlint:-classfile", # see b/32750402, go/javac-warnings#classfile
+    "-Xlint:-classfile",  # see b/32750402, go/javac-warnings#classfile
 ]
 
 # The bazel errorprone plugin currently only enables default errorChecks

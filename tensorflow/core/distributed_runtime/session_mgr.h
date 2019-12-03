@@ -48,9 +48,21 @@ class SessionMgr {
   // Allocates state for a new session.
   Status CreateSession(const string& session, const ServerDef& server_def,
                        bool isolate_session_state);
+  Status CreateSession(
+      const string& session, const ServerDef& server_def,
+      const protobuf::RepeatedPtrField<DeviceAttributes>& device_attributes,
+      bool isolate_session_state);
+
+  // Updates state (worker cache, devices) of worker session identified by
+  // session name (`session`) based on a new server_def and set of devices.
+  Status UpdateSession(const string& session, const ServerDef& server_def,
+                       const protobuf::RepeatedPtrField<DeviceAttributes>&
+                           cluster_device_attributes,
+                       bool isolate_session_state);
 
   // Locates the worker session for a given session handle
-  std::shared_ptr<WorkerSession> WorkerSessionForSession(const string& session);
+  Status WorkerSessionForSession(const string& session_handle,
+                                 std::shared_ptr<WorkerSession>* out_session);
   std::shared_ptr<WorkerSession> LegacySession();
 
   Status DeleteSession(const string& session);
@@ -64,7 +76,7 @@ class SessionMgr {
   void ClearLogs();
 
  private:
-  const WorkerEnv* const worker_env_;  // Not owned.
+  WorkerEnv* const worker_env_;  // Not owned.
 
   // A note about destruction:
   // We must delete graph_mgr before device_mgr, due to shared
@@ -86,8 +98,9 @@ class SessionMgr {
 
   const WorkerCacheFactory worker_cache_factory_;
 
-  std::shared_ptr<WorkerSession> WorkerSessionForSessionUnlocked(
-      const string& session) EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  Status WorkerSessionForSessionLocked(
+      const string& session_handle, std::shared_ptr<WorkerSession>* out_session)
+      EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   mutex mu_;
   // A map from session identifier to internal session structure.

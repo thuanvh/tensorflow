@@ -28,10 +28,9 @@
   ** Please don't remove this file - it is supporting some 3rd party plugins **
 """
 
-licenses(["notice"])
-
 package(
     default_visibility = ["//visibility:public"],
+    licenses = ["notice"],
 )
 
 cc_library(
@@ -48,18 +47,4 @@ cc_library(
     deps = [
         "//tensorflow/compiler/jit:xla_device",
     ],
-)
-
-#-----------------------------------------------------------------------------
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
 )

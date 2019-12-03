@@ -1,19 +1,20 @@
 # Description:
 #   TensorFlow camera demo app for Android.
 
-package(default_visibility = ["//visibility:public"])
-
-licenses(["notice"])  # Apache 2.0
-
+load("@build_bazel_rules_android//android:rules.bzl", "android_binary")
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_copts",
-    "tf_opts_nortti_if_android",
+)
+
+package(
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],  # Apache 2.0
 )
 
 exports_files(["LICENSE"])
 
-LINKER_SCRIPT = "//tensorflow/contrib/android:jni/version_script.lds"
+LINKER_SCRIPT = "jni/version_script.lds"
 
 # libtensorflow_demo.so contains the native code for image colorspace conversion
 # and object tracking used by the demo. It does not require TF as a dependency
@@ -35,8 +36,7 @@ cc_binary(
         "-lm",
         "-z defs",
         "-s",
-        "-Wl,--version-script",  # This line must be directly followed by LINKER_SCRIPT.
-        LINKER_SCRIPT,
+        "-Wl,--version-script,$(location {})".format(LINKER_SCRIPT),
     ],
     linkshared = 1,
     linkstatic = 1,
@@ -53,7 +53,7 @@ cc_library(
     name = "tensorflow_native_libs",
     srcs = [
         ":libtensorflow_demo.so",
-        "//tensorflow/contrib/android:libtensorflow_inference.so",
+        "//tensorflow/tools/android/inference_interface:libtensorflow_inference.so",
     ],
     tags = [
         "manual",
@@ -76,7 +76,6 @@ android_binary(
     custom_package = "org.tensorflow.demo",
     inline_constants = 1,
     manifest = "AndroidManifest.xml",
-    manifest_merger = "legacy",
     resource_files = glob(["res/**"]),
     tags = [
         "manual",
@@ -84,7 +83,7 @@ android_binary(
     ],
     deps = [
         ":tensorflow_native_libs",
-        "//tensorflow/contrib/android:android_tensorflow_inference_java",
+        "//tensorflow/tools/android/inference_interface:android_tensorflow_inference_java",
     ],
 )
 
@@ -99,22 +98,6 @@ filegroup(
     ],
 )
 # LINT.ThenChange(//tensorflow/examples/android/download-models.gradle)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-            "bin/**",
-            "gen/**",
-            "gradleBuild/**",
-            "libs/**",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
-)
 
 filegroup(
     name = "java_files",
@@ -134,4 +117,6 @@ filegroup(
     srcs = glob(["res/**"]),
 )
 
-exports_files(["AndroidManifest.xml"])
+exports_files([
+    "AndroidManifest.xml",
+])

@@ -20,7 +20,7 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/xla/client/client_library.h"
-#include "tensorflow/compiler/xla/client/computation_builder.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/util/bcast.h"
 
@@ -30,12 +30,22 @@ namespace tensorflow {
 // shape input_shape) keyed on indices (of shape indices_shape).
 //
 // index_type must be must be DT_INT32 or DT_INT64.
-xla::ComputationDataHandle XlaComputeGatherDynamicSlice(
-    XlaOpKernelContext* ctx, const xla::ComputationDataHandle& input,
-    const TensorShape& input_shape, const xla::ComputationDataHandle& indices,
-    const TensorShape& indices_shape, int64 axis, DataType dtype,
-    DataType index_type, xla::ComputationBuilder* builder);
+// If `indices_are_nd` is true, the last dimension of `indices` are treated as
+// a multidimensional index values. Otherwise, `indices` is treated as a tensor
+// of scalar indices.
+Status XlaGather(const xla::XlaOp& input, const TensorShape& input_shape,
+                 const xla::XlaOp& indices, const TensorShape& indices_shape,
+                 int64 axis, bool indices_are_nd, DataType dtype,
+                 DataType index_type, xla::XlaBuilder* builder,
+                 xla::XlaOp* gather_output);
 
+// The implementation of Gather and ResourceGather through XLA. Uses `input` as
+// the input instead of context->input(0) in order to allow ResourceGather to
+// handle obtaining the data from the ResourceVariable.
+Status XlaGatherWithBatchDimsOpImpl(XlaOpKernelContext* context,
+                                    const xla::XlaOp input,
+                                    const TensorShape& input_shape,
+                                    int batch_dims, xla::XlaOp* gather_output);
 }  // namespace tensorflow
 
 #endif  // TENSORFLOW_COMPILER_TF2XLA_KERNELS_GATHER_OP_HELPERS_H_

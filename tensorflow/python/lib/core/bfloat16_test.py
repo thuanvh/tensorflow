@@ -24,12 +24,12 @@ import math
 import numpy as np
 
 # pylint: disable=unused-import,g-bad-import-order
-from tensorflow.python import pywrap_tensorflow
+from tensorflow.python import _pywrap_bfloat16
 from tensorflow.python.framework import dtypes
 from tensorflow.python.platform import test
 
 
-bfloat16 = pywrap_tensorflow.TF_bfloat16_type()
+bfloat16 = _pywrap_bfloat16.TF_bfloat16_type()
 
 
 class Bfloat16Test(test.TestCase):
@@ -244,6 +244,20 @@ class Bfloat16NumPyTest(test.TestCase):
     self.assertAllClose(np.logaddexp(x, y),
                         np.logaddexp(x.astype(bfloat16), y.astype(bfloat16)),
                         atol=2e-2)
+
+  def testArange(self):
+    self.assertAllEqual(
+        np.arange(100, dtype=np.float32).astype(bfloat16),
+        np.arange(100, dtype=bfloat16))
+    self.assertAllEqual(
+        np.arange(-10.5, 7.8, 0.5, dtype=np.float32).astype(bfloat16),
+        np.arange(-10.5, 7.8, 0.5, dtype=bfloat16))
+    self.assertAllEqual(
+        np.arange(-0., -7., -0.25, dtype=np.float32).astype(bfloat16),
+        np.arange(-0., -7., -0.25, dtype=bfloat16))
+    self.assertAllEqual(
+        np.arange(-16384., 16384., 64., dtype=np.float32).astype(bfloat16),
+        np.arange(-16384., 16384., 64., dtype=bfloat16))
 
 
 if __name__ == "__main__":

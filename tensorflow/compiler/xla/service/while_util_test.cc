@@ -15,19 +15,26 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/while_util.h"
 
+#include <memory>
+
+#include "absl/algorithm/container.h"
 #include "tensorflow/compiler/xla/service/hlo_matchers.h"
 #include "tensorflow/compiler/xla/test.h"
-#include "tensorflow/compiler/xla/tools/parser/hlo_parser.h"
+#include "tensorflow/compiler/xla/tests/hlo_test_base.h"
+#include "tensorflow/compiler/xla/tests/verified_hlo_module.h"
+#include "tensorflow/compiler/xla/util.h"
 
 namespace xla {
 namespace {
 
 namespace op = ::xla::testing::opcode_matchers;
 
-StatusOr<std::unique_ptr<HloModule>> GetParsedModule(
-    HloComputation** entry_computation, HloInstruction** param0,
-    HloInstruction** param1, HloInstruction** param2) {
-  const char* const hlo_string = R"(
+class WhileUtilTest : public HloTestBase {
+ protected:
+  StatusOr<std::unique_ptr<VerifiedHloModule>> GetParsedModule(
+      HloComputation** entry_computation, HloInstruction** param0,
+      HloInstruction** param1, HloInstruction** param2) {
+    const char* const hlo_string = R"(
 HloModule ModuleWithWhile
 
 while_body {
@@ -35,7 +42,7 @@ while_body {
 }
 
 while_condition {
-  p_cond = f32[32,32]{1,0} parameter(0)
+  p_cond = (f32[32,32]{1,0}, f32[32,32]{1,0}) parameter(0)
   ROOT result = pred[] constant(true)
 }
 
@@ -48,23 +55,23 @@ ENTRY entry {
 }
 )";
 
-  TF_ASSIGN_OR_RETURN(std::unique_ptr<HloModule> module,
-                      tools::Parse(hlo_string));
+    TF_ASSIGN_OR_RETURN(auto module, ParseAndReturnVerifiedModule(hlo_string));
 
-  *entry_computation = module->entry_computation();
-  *param0 = (*entry_computation)->parameter_instruction(0);
-  *param1 = (*entry_computation)->parameter_instruction(1);
-  *param2 = (*entry_computation)->parameter_instruction(2);
+    *entry_computation = module->entry_computation();
+    *param0 = (*entry_computation)->parameter_instruction(0);
+    *param1 = (*entry_computation)->parameter_instruction(1);
+    *param2 = (*entry_computation)->parameter_instruction(2);
 
-  return std::move(module);
-}
+    return std::move(module);
+  }
+};
 
-TEST(WhileUtil, MakeZeroInstructionsLiveOp) {
+TEST_F(WhileUtilTest, MakeZeroInstructionsLiveOp) {
   HloInstruction *param0, *param1, *param2;
   HloComputation* entry_computation;
 
   TF_ASSERT_OK_AND_ASSIGN(
-      std::unique_ptr<HloModule> module,
+      auto module,
       GetParsedModule(&entry_computation, &param0, &param1, &param2));
 
   HloInstruction* while_instr = entry_computation->root_instruction();
@@ -90,12 +97,12 @@ TEST(WhileUtil, MakeZeroInstructionsLiveOp) {
                         op::GetTupleElement(param_reconstructed, 1)));
 }
 
-TEST(WhileUtilTest, MakeTwoInstructionsLive) {
+TEST_F(WhileUtilTest, MakeTwoInstructionsLive) {
   HloInstruction *param0, *param1, *param2;
   HloComputation* entry_computation;
 
   TF_ASSERT_OK_AND_ASSIGN(
-      std::unique_ptr<HloModule> module,
+      auto module,
       GetParsedModule(&entry_computation, &param0, &param1, &param2));
 
   HloInstruction* while_instr = entry_computation->root_instruction();
@@ -126,5 +133,86 @@ TEST(WhileUtilTest, MakeTwoInstructionsLive) {
                         op::GetTupleElement(op::Parameter(0), 3)));
 }
 
+TEST_F(WhileUtilTest, GetInvariantGTEsForWhileBody) {
+  const char* const hlo_string = R"(
+HloModule ModuleWithWhile
+
+body {
+  param.b = (s32[], s32[]) parameter(0)
+  gte.0 = s32[] get-tuple-element(param.b), index=0
+  gte.1 = s32[] get-tuple-element(param.b), index=1
+  add = s32[] add(gte.0, gte.1)
+  ROOT tuple = (s32[], s32[]) tuple(gte.0, add)
+}
+
+cond {
+  param.c = (s32[], s32[]) parameter(0)
+  ROOT constant = pred[] constant(true)
+}
+
+ENTRY main {
+  init = (s32[], s32[]) parameter(0)
+  ROOT while = (s32[], s32[]) while(init), condition=cond, body=body
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  HloComputation* while_body = module->GetComputationWithName("body");
+
+  ASSERT_NE(while_body, nullptr)
+      << "Expected exactly one while_body computation";
+
+  std::vector<HloInstruction*> gte_list =
+      WhileUtil::GetInvariantGTEsForWhileBody(*while_body);
+
+  ASSERT_EQ(gte_list.size(), 1);
+  EXPECT_EQ((*gte_list.begin())->name(), "gte.0");
+}
+
+TEST_F(WhileUtilTest, AlwaysRemovePreviousWhileBody) {
+  const char* const hlo_string = R"(
+HloModule WhileWithSideEffects
+
+body {
+  param.b = (s32[], s32[]) parameter(0)
+  gte.0 = s32[] get-tuple-element(param.b), index=0
+  gte.1 = s32[] get-tuple-element(param.b), index=1
+  add = s32[] add(gte.0, gte.1)
+  ROOT tuple = (s32[], s32[]) tuple(gte.0, add)
+}
+
+cond {
+  param.c = (s32[], s32[]) parameter(0)
+  token0 = token[] after-all()
+  infeed = (pred[], token[]) infeed(token0)
+  ROOT condition = pred[] get-tuple-element(infeed), index=0
+}
+
+ENTRY main {
+  init = (s32[], s32[]) parameter(0)
+  to_make_live_in = f32[100] parameter(1)
+  ROOT while = (s32[], s32[]) while(init), condition=cond, body=body
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  HloComputation* main = module->GetComputationWithName("main");
+  HloInstruction* while_instr = main->root_instruction();
+  HloInstruction* to_make_live_in = main->parameter_instruction(1);
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      WhileUtil::MakeInstructionsLiveInResult make_live_in_result,
+      WhileUtil::MakeInstructionsLiveIn(while_instr,
+                                        /*instructions=*/{to_make_live_in}));
+
+  auto is_while = [](const HloInstruction* instr) {
+    return instr->opcode() == HloOpcode::kWhile;
+  };
+  EXPECT_EQ(absl::c_count_if(main->instructions(), is_while), 1);
+}
 }  // namespace
 }  // namespace xla

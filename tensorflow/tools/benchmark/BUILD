@@ -1,15 +1,16 @@
 # Description:
 #   Benchmark utility that can run on desktop and Android.
 
-package(default_visibility = ["//visibility:public"])
-
-licenses(["notice"])  # Apache 2.0
-
 load(
     "//tensorflow:tensorflow.bzl",
-    "tf_copts",
-    "tf_cc_test",
     "tf_cc_binary",
+    "tf_cc_test",
+    "tf_copts",
+)
+
+package(
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],  # Apache 2.0
 )
 
 exports_files(["LICENSE"])
@@ -89,13 +90,4 @@ tf_cc_binary(
     linkstatic = 1,
     visibility = ["//visibility:public"],
     deps = [":benchmark_model_lib"],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = ["**/OWNERS"],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
 )

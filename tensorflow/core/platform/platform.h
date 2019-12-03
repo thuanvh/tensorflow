@@ -29,24 +29,25 @@ limitations under the License.
 #define IS_MOBILE_PLATFORM
 
 #elif defined(__APPLE__)
-#define PLATFORM_POSIX
 #include "TargetConditionals.h"
-#if TARGET_IPHONE_SIMULATOR
+#if TARGET_IPHONE_SIMULATOR || TARGET_OS_IPHONE
+#define PLATFORM_POSIX_IOS
 #define IS_MOBILE_PLATFORM
-#elif TARGET_OS_IPHONE
-#define IS_MOBILE_PLATFORM
+#else
+#define PLATFORM_POSIX
 #endif
 
 #elif defined(_WIN32)
 #define PLATFORM_WINDOWS
 
-#elif defined(__arm__)
+#elif defined(__arm__) || defined(__EMSCRIPTEN__)
 #define PLATFORM_POSIX
 
-// Require an outside macro to tell us if we're building for Raspberry Pi.
-#if !defined(RASPBERRY_PI)
+// Require an outside macro to tell us if we're building for Raspberry Pi or
+// another ARM device that's not a mobile platform.
+#if !defined(RASPBERRY_PI) && !defined(ARM_NON_MOBILE)
 #define IS_MOBILE_PLATFORM
-#endif  // !defined(RASPBERRY_PI)
+#endif  // !defined(RASPBERRY_PI) && !defined(ARM_NON_MOBILE)
 
 #else
 // If no platform specified, use:

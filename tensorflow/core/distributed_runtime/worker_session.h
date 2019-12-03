@@ -30,33 +30,78 @@ class GraphMgr;
 class WorkerCacheInterface;
 
 // WorkerSession encapsulates all of the state relating to a given session.
-struct WorkerSession {
+class WorkerSession {
+ public:
+  // Collection of local devices. These devices are typically
+  // RenamedDevices in all except the SessionMgr.legacy_session_ and
+  // sessions created with `isolate_session_state == false`. In the
+  // those cases, this method returns a pointer to a borrowed
+  // DeviceMgr (typically the `worker_env.device_mgr`).
+  DeviceMgr* device_mgr() {
+    return device_mgr_ ? device_mgr_.get() : borrowed_device_mgr_;
+  }
+
+  DynamicDeviceMgr* remote_device_mgr() { return remote_device_mgr_.get(); }
+
+  const string& session_name() const { return session_name_; }
+  const string& worker_name() const { return worker_name_; }
+
+  WorkerCacheInterface* worker_cache() const { return worker_cache_.get(); }
+  GraphMgr* graph_mgr() const { return graph_mgr_.get(); }
+
+  ClusterFunctionLibraryRuntime* cluster_flr() const {
+    return cluster_flr_.get();
+  }
+
+  WorkerSession(const string& session_name, const string& worker_name,
+                std::unique_ptr<WorkerCacheInterface> worker_cache,
+                std::unique_ptr<DeviceMgr> device_mgr,
+                std::unique_ptr<GraphMgr> graph_mgr,
+                std::unique_ptr<DynamicDeviceMgr> remote_device_mgr);
+
+  static std::shared_ptr<WorkerSession> CreateWithBorrowedDeviceMgr(
+      const string& session_name, const string& worker_name,
+      std::unique_ptr<WorkerCacheInterface> worker_cache,
+      DeviceMgr* borrowed_device_mgr, std::unique_ptr<GraphMgr> graph_mgr,
+      std::unique_ptr<DynamicDeviceMgr> remote_device_mgr);
+
+  // Update an existing worker session with new set of remote workers and
+  // devices. Added devices will be owned by the worker session, and removed
+  // devices will be freed by their names.
+  Status UpdateWorkerCacheAndDevices(
+      std::unique_ptr<WorkerCacheInterface> new_worker_cache,
+      std::vector<std::unique_ptr<Device>> added_remote_devices,
+      const std::vector<Device*>& removed_remote_devices);
+
+  ~WorkerSession();
+
+ private:
+  WorkerSession(const string& session_name, const string& worker_name,
+                std::unique_ptr<WorkerCacheInterface> worker_cache,
+                DeviceMgr* borrowed_device_mgr,
+                std::unique_ptr<GraphMgr> graph_mgr,
+                std::unique_ptr<DynamicDeviceMgr> remote_device_mgr);
+
   // The name of the session.
-  const string session_name;
+  const string session_name_;
 
   // The name of the worker. E.g., /job:mnist/replica:0/task:1.
-  const string worker_name;
+  const string worker_name_;
 
   // Object from which WorkerInterface instances can be obtained.
-  const std::unique_ptr<WorkerCacheInterface> worker_cache;
-
-  // Collection of local devices. These devices are typically RenamedDevices
-  // in all except the SessionMgr.legacy_session_. legacy_session_.device_mgr
-  // == worker_env_.device_mgr, which holds the true devices.
-  const std::unique_ptr<DeviceMgr> device_mgr;
+  std::unique_ptr<WorkerCacheInterface> worker_cache_;
 
   // graph_mgr keeps track of the registered graphs of this session.
   //
   // Note: graph_mgr must be deleted before rendezvous_mgr!
   // Note: graph_mgr must be deleted before device_mgr!
-  const std::unique_ptr<GraphMgr> graph_mgr;
+  const std::unique_ptr<GraphMgr> graph_mgr_;
 
-  std::unique_ptr<ClusterFunctionLibraryRuntime> cluster_flr;
+  std::unique_ptr<ClusterFunctionLibraryRuntime> cluster_flr_;
 
-  WorkerSession(const string& session_name, const string& worker_name,
-                std::unique_ptr<WorkerCacheInterface> worker_cache,
-                std::unique_ptr<DeviceMgr> device_mgr,
-                std::unique_ptr<GraphMgr> graph_mgr);
+  const std::unique_ptr<DeviceMgr> device_mgr_;
+  DeviceMgr* const borrowed_device_mgr_;  // Not owned.
+  std::unique_ptr<DynamicDeviceMgr> remote_device_mgr_;
 };
 
 }  // namespace tensorflow

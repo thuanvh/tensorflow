@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_GRAPH_COSTMODEL_H_
-#define TENSORFLOW_GRAPH_COSTMODEL_H_
+#ifndef TENSORFLOW_CORE_GRAPH_COSTMODEL_H_
+#define TENSORFLOW_CORE_GRAPH_COSTMODEL_H_
 
 #include <unordered_map>
 #include <vector>
@@ -183,8 +183,8 @@ class CostModel {
 
   const bool is_global_;
 
-  // Resizes vectors so that they are large enough for "id".
-  void Ensure(int id);
+  // Resizes vectors so that they are large enough for "id" and id's outputs.
+  void Ensure(int id, int num_outputs);
 
   // Nodes and Edges whose count is < this value
   // get type/byte estimates of 0.
@@ -198,7 +198,7 @@ class CostModel {
   // Cumulative execution time.
   std::vector<Microseconds> time_;
   // Cumulative Bytes output on each channel.
-  std::vector<gtl::InlinedVector<Bytes, 2> > slot_bytes_;
+  std::vector<gtl::InlinedVector<Bytes, 2>> slot_bytes_;
 
   // Maximum execution time
   std::vector<Microseconds> max_exec_time_;
@@ -217,7 +217,7 @@ class CostModel {
   };
   std::vector<MemUsage> max_mem_usage_;
 
-  std::vector<gtl::InlinedVector<int64, 2> > output_port_alloc_ids_;
+  std::vector<gtl::InlinedVector<int64, 2>> output_port_alloc_ids_;
 
   std::set<int64> persistent_alloc_ids_;
   std::map<string, std::set<int64>> persistent_alloc_ids_by_devices_;
@@ -229,4 +229,4 @@ class CostModel {
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_GRAPH_COSTMODEL_H_
+#endif  // TENSORFLOW_CORE_GRAPH_COSTMODEL_H_

@@ -1,12 +1,11 @@
 # Tests of TensorFlow kernels written using the Python API.
 
+load("//tensorflow:tensorflow.bzl", "cuda_py_test")
+
 package(
     default_visibility = ["//tensorflow:internal"],
+    licenses = ["notice"],  # Apache 2.0
 )
-
-licenses(["notice"])  # Apache 2.0
-
-load("//tensorflow:tensorflow.bzl", "cuda_py_test")
 
 cuda_py_test(
     name = "bijector_test",
@@ -41,6 +40,8 @@ cuda_py_test(
         "//tensorflow/python:math_ops",
         "//tensorflow/python:platform_test",
     ],
+    shard_count = 3,
+    xla_enable_strict_auto_jit = False,  # TODO(b/144920376)
 )
 
 cuda_py_test(
@@ -92,6 +93,7 @@ cuda_py_test(
     size = "small",
     srcs = ["categorical_test.py"],
     additional_deps = [
+        "@absl_py//absl/testing:parameterized",
         "//tensorflow/python/ops/distributions",
         "//third_party/py/numpy",
         "//tensorflow/python:array_ops",
@@ -132,6 +134,10 @@ cuda_py_test(
         "//tensorflow/python:framework_test_lib",
         "//tensorflow/python:math_ops",
         "//tensorflow/python:platform_test",
+    ],
+    tags = [
+        "noguitar",  # b/110489471
+        "notap",  # b/110489471
     ],
 )
 
@@ -211,7 +217,14 @@ cuda_py_test(
         "//tensorflow/python:nn_ops",
         "//tensorflow/python:platform_test",
     ],
-    tags = ["nomsan"],  # disable to avoid false positives from scipy.
+    tags = [
+        # TODO(b/121223043): Re-enable this test after fixing "mean not defined"
+        # errors.
+        "no_mac",
+        "no_oss",
+        # disable to avoid false positives from scipy.
+        "nomsan",
+    ],
 )
 
 cuda_py_test(
@@ -279,16 +292,4 @@ cuda_py_test(
         "//tensorflow/python:math_ops",
         "//tensorflow/python:platform_test",
     ],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
 )

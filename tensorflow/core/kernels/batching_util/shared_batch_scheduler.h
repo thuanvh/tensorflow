@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_KERNELS_BATCHING_UTIL_SHARED_BATCH_SCHEDULER_H_
 
 #include <stddef.h>
+
 #include <deque>
 #include <functional>
 #include <list>
@@ -30,10 +31,12 @@ limitations under the License.
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/strings/strcat.h"
+#include "tensorflow/core/platform/byte_order.h"
 #include "tensorflow/core/platform/cpu_info.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/thread_annotations.h"
 #include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/profiler/lib/traceme.h"
 
 namespace tensorflow {
 namespace serving {
@@ -108,7 +111,7 @@ class SharedBatchScheduler
 
     // The number of threads to use to process batches.
     // Must be >= 1, and should be tuned carefully.
-    int num_batch_threads = port::NumSchedulableCPUs();
+    int num_batch_threads = port::MaxParallelism();
 
     // The environment to use.
     // (Typically only overridden by test code.)
@@ -135,7 +138,7 @@ class SharedBatchScheduler
     // (inclusive). If there is a need to quantize the batch sizes, i.e. only
     // submit batches whose size is in a small set of allowed sizes, that can be
     // done by adding padding in the process-batch callback.
-    int max_batch_size = 1000;
+    size_t max_batch_size = 1000;
 
     // If a task has been enqueued for this amount of time (in microseconds),
     // and a thread is available, the scheduler will immediately form a batch
@@ -156,7 +159,7 @@ class SharedBatchScheduler
     // If this limit is reached, Schedule() will return an UNAVAILABLE error.
     // See the class documentation above for guidelines on how to tune this
     // parameter.
-    int max_enqueued_batches = 10;
+    size_t max_enqueued_batches = 10;
   };
   Status AddQueue(const QueueOptions& options,
                   std::function<void(std::unique_ptr<Batch<TaskType>>)>
@@ -393,7 +396,7 @@ Status SharedBatchScheduler<TaskType>::AddQueue(
     std::function<void(std::unique_ptr<Batch<TaskType>>)>
         process_batch_callback,
     std::unique_ptr<BatchScheduler<TaskType>>* queue) {
-  if (options.max_batch_size <= 0) {
+  if (options.max_batch_size == 0) {
     return errors::InvalidArgument("max_batch_size must be positive; was ",
                                    options.max_batch_size);
   }
@@ -525,6 +528,8 @@ Queue<TaskType>::~Queue() {
 
 template <typename TaskType>
 Status Queue<TaskType>::Schedule(std::unique_ptr<TaskType>* task) {
+  profiler::TraceMe trace_me(
+      [task] { return strings::StrCat("Schedule:", (*task)->size()); });
   if ((*task)->size() > options_.max_batch_size) {
     return errors::InvalidArgument("Task size ", (*task)->size(),
                                    " is larger than maximum batch size ",
@@ -615,6 +620,8 @@ std::unique_ptr<Batch<TaskType>> Queue<TaskType>::ScheduleBatch() {
 
 template <typename TaskType>
 void Queue<TaskType>::ProcessBatch(std::unique_ptr<Batch<TaskType>> batch) {
+  profiler::TraceMe trace_me(
+      [&batch] { return strings::StrCat("ProcessBatch:", batch->size()); });
   process_batch_callback_(std::move(batch));
 
   {

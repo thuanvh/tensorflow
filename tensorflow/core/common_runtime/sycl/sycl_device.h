@@ -187,9 +187,9 @@ class GSYCLInterface {
       type = "Unknown";
     }
 
-    return strings::StrCat("id: ", device_id, ", type: ", type, ", name: ",
-                           name.c_str(), ", vendor: ", vendor.c_str(),
-                           ", profile: ", profile.c_str());
+    return strings::StrCat(
+        "id: ", device_id, ", type: ", type, ", name: ", name.c_str(),
+        ", vendor: ", vendor.c_str(), ", profile: ", profile.c_str());
   }
 };
 
@@ -216,8 +216,7 @@ class SYCLDevice : public LocalDevice {
                              const AllocatorAttributes alloc_attrs,
                              Tensor* tensor) override;
 
-  Status FillContextMap(const Graph* graph,
-                        DeviceContextMap* device_context_map) override;
+  Status TryGetDeviceContext(DeviceContext** out_context) override;
 
   Status Sync() override;
 

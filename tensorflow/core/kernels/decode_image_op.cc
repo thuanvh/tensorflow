@@ -16,6 +16,8 @@ limitations under the License.
 // See docs in ../ops/image_ops.cc
 
 #include <memory>
+
+#include "absl/strings/escaping.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -41,9 +43,9 @@ enum FileFormat {
 // Classify the contents of a file based on starting bytes (the magic number).
 FileFormat ClassifyFileFormat(StringPiece data) {
   // The 4th byte of JPEG is '\xe0' or '\xe1', so check just the first three
-  if (data.starts_with("\xff\xd8\xff")) return kJpgFormat;
-  if (data.starts_with("\x89PNG\r\n\x1a\n")) return kPngFormat;
-  if (data.starts_with("\x47\x49\x46\x38")) return kGifFormat;
+  if (absl::StartsWith(data, "\xff\xd8\xff")) return kJpgFormat;
+  if (absl::StartsWith(data, "\x89PNG\r\n\x1a\n")) return kPngFormat;
+  if (absl::StartsWith(data, "\x47\x49\x46\x38")) return kGifFormat;
   return kUnknownFormat;
 }
 
@@ -58,13 +60,16 @@ string FileFormatString(FileFormat magic, StringPiece data) {
     default: {
       if (data.empty()) return "empty file";
       return strings::StrCat("unknown format starting with '",
-                             str_util::CEscape(data.substr(0, 16)), "'");
+                             absl::CEscape(data.substr(0, 16)), "'");
     }
   }
 }
 
 // Decode an image (either jpeg, png, or gif).  We use a single op so that
 // users don't have to care about which format they have.
+// TODO(b/141645641): Separate concerns here: constructors uses name to
+// determine type of parsing, compute uses file magic to parse and these might
+// not match.
 class DecodeImageOp : public OpKernel {
  public:
   explicit DecodeImageOp(OpKernelConstruction* context) : OpKernel(context) {
@@ -87,10 +92,11 @@ class DecodeImageOp : public OpKernel {
       channels_ = 3;
     } else {
       OP_REQUIRES_OK(context, context->GetAttr("channels", &channels_));
-      OP_REQUIRES(context, channels_ == 0 || channels_ == 1 || channels_ == 3 ||
-                               channels_ == 4,
-                  errors::InvalidArgument(
-                      "channels must be 0, 1, 3, or 4, got ", channels_));
+      OP_REQUIRES(
+          context,
+          channels_ == 0 || channels_ == 1 || channels_ == 3 || channels_ == 4,
+          errors::InvalidArgument("channels must be 0, 1, 3, or 4, got ",
+                                  channels_));
     }
     flags_.components = channels_;
 
@@ -114,8 +120,9 @@ class DecodeImageOp : public OpKernel {
 
     if (format_ == kJpgFormat) {
       OP_REQUIRES_OK(context, context->GetAttr("ratio", &flags_.ratio));
-      OP_REQUIRES(context, flags_.ratio == 1 || flags_.ratio == 2 ||
-                               flags_.ratio == 4 || flags_.ratio == 8,
+      OP_REQUIRES(context,
+                  flags_.ratio == 1 || flags_.ratio == 2 || flags_.ratio == 4 ||
+                      flags_.ratio == 8,
                   errors::InvalidArgument("ratio must be 1, 2, 4, or 8, got ",
                                           flags_.ratio));
       OP_REQUIRES_OK(context, context->GetAttr("fancy_upscaling",
@@ -130,8 +137,9 @@ class DecodeImageOp : public OpKernel {
       string dct_method;
       OP_REQUIRES_OK(context, context->GetAttr("dct_method", &dct_method));
       OP_REQUIRES(
-          context, (dct_method.empty() || dct_method == "INTEGER_FAST" ||
-                    dct_method == "INTEGER_ACCURATE"),
+          context,
+          (dct_method.empty() || dct_method == "INTEGER_FAST" ||
+           dct_method == "INTEGER_ACCURATE"),
           errors::InvalidArgument("dct_method must be one of "
                                   "{'', 'INTEGER_FAST', 'INTEGER_ACCURATE'}"));
       if (dct_method == "INTEGER_FAST") {
@@ -149,7 +157,7 @@ class DecodeImageOp : public OpKernel {
                                         contents.shape().DebugString()));
 
     // Determine format
-    const StringPiece input = contents.scalar<string>()();
+    const StringPiece input = contents.scalar<tstring>()();
     const auto magic = ClassifyFileFormat(input);
     OP_REQUIRES(
         context,
@@ -157,9 +165,9 @@ class DecodeImageOp : public OpKernel {
         errors::InvalidArgument("Expected image (JPEG, PNG, or GIF), got ",
                                 FileFormatString(magic, input)));
     OP_REQUIRES(context, input.size() <= std::numeric_limits<int>::max(),
-                errors::InvalidArgument(FileFormatString(magic, input),
-                                        " contents are too large for int: ",
-                                        input.size()));
+                errors::InvalidArgument(
+                    FileFormatString(magic, input),
+                    " contents are too large for int: ", input.size()));
     OP_REQUIRES(context, magic == kPngFormat || channel_bits_ == 8,
                 errors::InvalidArgument(FileFormatString(magic, input),
                                         " does not support uint16 output"));
@@ -212,9 +220,10 @@ class DecodeImageOp : public OpKernel {
             input.data(), input.size(), flags, nullptr /* nwarn */,
             [=, &output](int width, int height, int channels) -> uint8* {
               Status status(context->allocate_output(
-                  0, format_ == kGifFormat
-                         ? TensorShape({1, height, width, channels})
-                         : TensorShape({height, width, channels}),
+                  0,
+                  format_ == kGifFormat
+                      ? TensorShape({1, height, width, channels})
+                      : TensorShape({height, width, channels}),
                   &output));
               if (!status.ok()) {
                 VLOG(1) << status;

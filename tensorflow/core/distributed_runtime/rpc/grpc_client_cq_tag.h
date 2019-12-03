@@ -16,8 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_RPC_GRPC_CLIENT_CQ_TAG_H_
 #define TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_RPC_GRPC_CLIENT_CQ_TAG_H_
 
-#include "grpc++/grpc++.h"
-
+#include "grpcpp/grpcpp.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_util.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/macros.h"
@@ -32,7 +31,7 @@ class GrpcClientCQTag {
   virtual ~GrpcClientCQTag() {}
 
   // OnCompleted is invoked when the RPC has finished.
-  // Implementations of OnCompleted must delete *this.
+  // Implementations of OnCompleted can delete *this.
   virtual void OnCompleted(bool ok) = 0;
 
  private:

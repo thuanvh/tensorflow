@@ -16,11 +16,14 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_RECENT_REQUEST_IDS_H_
 #define TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_RECENT_REQUEST_IDS_H_
 
+#include <string>
+#include <unordered_set>
 #include <vector>
 
+#include "tensorflow/core/distributed_runtime/message_wrappers.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/gtl/flatset.h"
 #include "tensorflow/core/platform/mutex.h"
+#include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/thread_annotations.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/protobuf/worker.pb.h"
@@ -56,16 +59,37 @@ class RecentRequestIds {
   // ShortDebugString are added to returned errors.
   Status TrackUnique(int64 request_id, const string& method_name,
                      const protobuf::Message& request);
+  // Overloaded version of the above function for wrapped protos.
+  template <typename RequestWrapper>
+  Status TrackUnique(int64 request_id, const string& method_name,
+                     const RequestWrapper* wrapper);
 
  private:
+  bool Insert(int64 request_id);
+
   mutex mu_;
   // next_index_ indexes into circular_buffer_, and points to the next storage
   // space to use. When the buffer is full, next_index_ points at the oldest
   // request_id.
   int next_index_ GUARDED_BY(mu_) = 0;
   std::vector<int64> circular_buffer_ GUARDED_BY(mu_);
-  gtl::FlatSet<int64> set_ GUARDED_BY(mu_);
+  std::unordered_set<int64> set_ GUARDED_BY(mu_);
 };
+
+// Implementation details
+
+template <typename RequestWrapper>
+Status RecentRequestIds::TrackUnique(int64 request_id,
+                                     const string& method_name,
+                                     const RequestWrapper* wrapper) {
+  if (Insert(request_id)) {
+    return Status::OK();
+  } else {
+    return errors::Aborted("The same ", method_name,
+                           " request was received twice. ",
+                           wrapper->ToProto().ShortDebugString());
+  }
+}
 
 }  // namespace tensorflow
 

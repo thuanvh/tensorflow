@@ -18,6 +18,8 @@ limitations under the License.
 #include <deque>
 
 #include "tensorflow/compiler/xla/service/call_graph.h"
+#include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
+#include "tensorflow/compiler/xla/service/hlo_dce.h"
 #include "tensorflow/core/lib/core/errors.h"
 
 namespace xla {
@@ -95,7 +97,7 @@ class SubcomputationInsertionVisitor : public DfsHloVisitorWithDefault {
     if (it == subcomputation_hlo_to_new_hlo_.end()) {
       return NotFound(
           "Could not find mapping from subcomputation HLO %s to a cloned HLO.",
-          subcomputation_hlo->ToString().c_str());
+          subcomputation_hlo->ToString());
     }
     return it->second;
   }
@@ -141,16 +143,24 @@ StatusOr<bool> CallInliner::Run(HloModule* module) {
   bool did_mutate = false;
   TF_RETURN_IF_ERROR(
       call_graph->VisitNodes([&](const CallGraphNode& node) -> Status {
-        for (const CallSite& callsite : node.caller_callsites()) {
-          VLOG(1) << "Visiting callsite: " << callsite.ToString();
-          if (callsite.instruction()->opcode() == HloOpcode::kCall) {
-            HloInstruction* call = callsite.instruction();
-            TF_RETURN_IF_ERROR(Inline(call).status());
+        VLOG(1) << "Visiting node: " << node.ToString();
+        for (HloInstruction* instruction :
+             node.computation()->MakeInstructionPostOrder()) {
+          if (instruction->opcode() == HloOpcode::kCall) {
+            TF_RETURN_IF_ERROR(Inline(instruction).status());
             did_mutate = true;
           }
         }
         return Status::OK();
       }));
+  if (did_mutate) {
+    // Run DCE to remove called computations which are now becoming unused.
+    // This can result then in problems if within the called computation, there
+    // were send/recv instructions, which the module group verifier will flag as
+    // error findingthe same channel ID used for multiple send/recv
+    // instructions.
+    TF_RETURN_IF_ERROR(HloDCE().Run(module).status());
+  }
   return did_mutate;
 }
 

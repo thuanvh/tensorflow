@@ -21,6 +21,8 @@ limitations under the License.
 #include "tensorflow/cc/training/queue_runner.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
+#include "tensorflow/core/common_runtime/gpu/gpu_id.h"
+#include "tensorflow/core/common_runtime/gpu/gpu_id_manager.h"
 #include "tensorflow/core/grappler/clusters/utils.h"
 #include "tensorflow/core/grappler/utils.h"
 #include "tensorflow/core/kernels/ops_util.h"
@@ -28,6 +30,7 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/notification.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/public/session.h"
 
 namespace tensorflow {
@@ -36,10 +39,7 @@ namespace grappler {
 static std::atomic<bool> already_provisioned(false);
 
 SingleMachine::SingleMachine(int timeout_s, int num_cpu_cores, int num_gpus)
-    : Cluster(timeout_s),
-      num_gpus_(num_gpus),
-      expected_init_time_s_(0),
-      closing_(false) {
+    : Cluster(timeout_s), expected_init_time_s_(0), closing_(false) {
   VLOG(1) << "Number of CPU cores: " << num_cpu_cores
           << " Number of GPUs: " << num_gpus;
   thread_pool_.reset(new thread::ThreadPool(
@@ -82,14 +82,27 @@ Status SingleMachine::Provision() {
 
   std::vector<DeviceAttributes> devices;
   TF_RETURN_IF_ERROR(session_->ListDevices(&devices));
-  int gpu_id = 0;
   for (const auto& dev : devices) {
     DeviceProperties attr;
     if (dev.device_type() == "CPU") {
       attr = GetLocalCPUInfo();
     } else if (dev.device_type() == "GPU") {
-      attr = GetLocalGPUInfo(gpu_id++);
-    } else {
+      DeviceNameUtils::ParsedName parsed;
+      if (!DeviceNameUtils::ParseFullName(dev.name(), &parsed)) {
+        return errors::InvalidArgument(
+            strings::StrCat("Not able to parse GPU device name: ", dev.name()));
+      }
+      TfGpuId tf_gpu_id(parsed.id);
+      PlatformGpuId platform_gpu_id;
+      Status s = GpuIdManager::TfToPlatformGpuId(tf_gpu_id, &platform_gpu_id);
+      if (!s.ok()) {
+        return errors::Unavailable("Unknown TF GPU device with id ",
+                                   tf_gpu_id.value(), ": ", s.ToString());
+      }
+      attr = GetLocalGPUInfo(platform_gpu_id);
+    } else if (dev.device_type().find("XLA") == string::npos) {
+      // Filter out the fake XLA devices to avoid double counting the actual
+      // hardware resources that are available.
       attr.set_type(dev.device_type());
     }
     // Overwrite the memory size since users might have requested to use only a
@@ -132,50 +145,44 @@ Status SingleMachine::Run(const GraphDef& graph_def,
                           const std::vector<std::pair<string, Tensor>>& feed,
                           const std::vector<string>& fetch,
                           RunMetadata* metadata) {
-  {
-    mutex_lock l(this->last_graph_mu_);
-    if (last_graph_ != &graph_def) {
-      TF_RETURN_IF_ERROR(ResetSession());
-      TF_RETURN_IF_ERROR(session_->Create(graph_def));
-      if (!init_ops_.empty()) {
-        init_metadata_ = RunMetadata();
-        int64 timeout_s = timeout_s_ + expected_init_time_s_;
-        TF_RETURN_IF_ERROR(
-            RunWithTimeout({}, init_ops_, &init_metadata_, timeout_s));
-        // The compute cost for init ops is likely to be pessimistic since init
-        // ops are run only once before warmup. Therefore we only keep their
-        // memory costs.
-        for (auto node : *init_metadata_.mutable_cost_graph()->mutable_node()) {
-          node.clear_compute_cost();
-        }
-        // Also clear the timeline to save memory
-        init_metadata_.clear_step_stats();
+  mutex_lock l(this->last_graph_mu_);
+  if (last_graph_ != &graph_def) {
+    TF_RETURN_IF_ERROR(ResetSession());
+    TF_RETURN_IF_ERROR(session_->Create(graph_def));
+    if (!init_ops_.empty()) {
+      init_metadata_ = RunMetadata();
+      int64 timeout_s = timeout_s_ + expected_init_time_s_;
+      TF_RETURN_IF_ERROR(
+          RunWithTimeout({}, init_ops_, &init_metadata_, timeout_s));
+      // The compute cost for init ops is likely to be pessimistic since init
+      // ops are run only once before warmup. Therefore we only keep their
+      // memory costs.
+      for (auto node : *init_metadata_.mutable_cost_graph()->mutable_node()) {
+        node.clear_compute_cost();
       }
-      // We can have at most one hardware trace. Use it for the main graph, and
-      // downgrade tracing of the queue runners to a software trace.
-      RunOptions queue_options = run_options_;
-      if (queue_options.trace_level() >= RunOptions::HARDWARE_TRACE) {
-        queue_options.set_trace_level(RunOptions::SOFTWARE_TRACE);
-      }
-      for (size_t i = 0; i < queue_runner_defs_.size(); ++i) {
-        std::unique_ptr<QueueRunner> queue_runner;
-        TF_RETURN_IF_ERROR(QueueRunner::New(queue_runner_defs_[i],
-                                            coordinator_.get(), &queue_runner));
+      // Also clear the timeline to save memory
+      init_metadata_.clear_step_stats();
+    }
+    // We can have at most one hardware trace. Use it for the main graph, and
+    // downgrade tracing of the queue runners to a software trace.
+    RunOptions queue_options = run_options_;
+    if (queue_options.trace_level() >= RunOptions::HARDWARE_TRACE) {
+      queue_options.set_trace_level(RunOptions::SOFTWARE_TRACE);
+    }
+    for (size_t i = 0; i < queue_runner_defs_.size(); ++i) {
+      std::unique_ptr<QueueRunner> queue_runner;
+      TF_RETURN_IF_ERROR(QueueRunner::New(queue_runner_defs_[i],
+                                          coordinator_.get(), &queue_runner));
 
-        TF_RETURN_IF_ERROR(queue_runner->StartAndCollectCostGraph(
-            session_.get(), queue_options));
-        TF_RETURN_IF_ERROR(
-            coordinator_->RegisterRunner(std::move(queue_runner)));
-        TF_RETURN_IF_ERROR(coordinator_->GetStatus());
-      }
+      TF_RETURN_IF_ERROR(queue_runner->StartAndCollectCostGraph(session_.get(),
+                                                                queue_options));
+      TF_RETURN_IF_ERROR(coordinator_->RegisterRunner(std::move(queue_runner)));
+      TF_RETURN_IF_ERROR(coordinator_->GetStatus());
+    }
 
-      // Warmup TensorFlow if needed
-      for (int i = 0;
-           i < options_.config.graph_options().build_cost_model_after(); ++i) {
-        TF_RETURN_IF_ERROR(RunWithTimeout(feed, fetch, nullptr));
-      }
-
-      last_graph_ = &graph_def;
+    // Warmup TensorFlow if needed
+    for (int i = 0; i < NumWarmupSteps(); ++i) {
+      TF_RETURN_IF_ERROR(RunWithTimeout(feed, fetch, nullptr));
     }
   }
 
@@ -187,8 +194,11 @@ Status SingleMachine::Run(const GraphDef& graph_def,
     MergeCosts(metadata->mutable_cost_graph(), init_metadata_.cost_graph(),
                queue_costs);
   } else {
-    return RunWithTimeout(feed, fetch, nullptr);
+    TF_RETURN_IF_ERROR(RunWithTimeout(feed, fetch, nullptr));
   }
+
+  last_graph_ = &graph_def;
+
   return Status::OK();
 }
 
@@ -214,14 +224,14 @@ Status SingleMachine::GetPeakMemoryUsage(
 
   device_peak_memory->clear();
   for (Device* device : devices) {
-    AllocatorStats stats;
     auto* allocator = device->GetAllocator(AllocatorAttributes());
     if (!allocator->TracksAllocationSizes()) {
       return Status(error::INVALID_ARGUMENT,
                     "Tracking allocation is not enabled.");
     }
-    allocator->GetStats(&stats);
-    (*device_peak_memory)[device->name()] = stats.max_bytes_in_use;
+    absl::optional<AllocatorStats> stats = allocator->GetStats();
+    (*device_peak_memory)[device->name()] =
+        (stats ? stats->peak_bytes_in_use : 0);
   }
 
   return Status::OK();
@@ -355,6 +365,15 @@ Status SingleMachine::ResetSession() {
   }
   coordinator_.reset(new Coordinator());
 
+  // Build the DeviceSet.
+  device_set_.reset(new DeviceSet);
+  const DeviceMgr* device_mgr;
+  TF_RETURN_IF_ERROR(session_->LocalDeviceManager(&device_mgr));
+  for (auto d : device_mgr->ListDevices()) {
+    device_set_->AddDevice(d);
+    // We currently don't care about the client device.
+  }
+
   return Status::OK();
 }
 
@@ -365,10 +384,15 @@ void SingleMachine::MergeCosts(CostGraphDef* graph_costs,
                                        init_costs.node_size() +
                                        queue_costs.node_size());
   std::unordered_set<string> nodes_seen;
+  int queue_costs_id_offset = graph_costs->node_size();
   for (const auto& node : graph_costs->node()) {
     nodes_seen.insert(node.name());
+    if (node.id() >= queue_costs_id_offset) {
+      queue_costs_id_offset = node.id() + 1;
+    }
   }
 
+  int init_costs_id_offset = queue_costs_id_offset + queue_costs.node_size();
   // The costs obtained by running the main graph could be more stable than
   // the one we get from the queue runners since the queue runners run
   // asynchronously.
@@ -376,7 +400,22 @@ void SingleMachine::MergeCosts(CostGraphDef* graph_costs,
     if (nodes_seen.find(node.name()) != nodes_seen.end()) {
       continue;
     }
-    graph_costs->add_node()->MergeFrom(node);
+
+    auto* new_node = graph_costs->add_node();
+    new_node->MergeFrom(node);
+
+    new_node->set_id(node.id() + queue_costs_id_offset);
+    if (new_node->id() >= init_costs_id_offset) {
+      init_costs_id_offset = new_node->id() + 1;
+    }
+
+    for (auto& input_info : *new_node->mutable_input_info()) {
+      input_info.set_preceding_node(input_info.preceding_node() +
+                                    queue_costs_id_offset);
+    }
+    for (auto& control_input : *new_node->mutable_control_input()) {
+      control_input += queue_costs_id_offset;
+    }
   }
 
   // Don't overwrite the costs with that generated during initialization since
@@ -385,7 +424,18 @@ void SingleMachine::MergeCosts(CostGraphDef* graph_costs,
     if (nodes_seen.find(node.name()) != nodes_seen.end()) {
       continue;
     }
-    graph_costs->add_node()->MergeFrom(node);
+
+    auto* new_node = graph_costs->add_node();
+    new_node->MergeFrom(node);
+
+    new_node->set_id(node.id() + init_costs_id_offset);
+    for (auto& input_info : *new_node->mutable_input_info()) {
+      input_info.set_preceding_node(input_info.preceding_node() +
+                                    init_costs_id_offset);
+    }
+    for (auto& control_input : *new_node->mutable_control_input()) {
+      control_input += init_costs_id_offset;
+    }
   }
 }
 
@@ -402,7 +452,6 @@ Status SingleMachine::ClearAllocatorStats() const {
   std::vector<Device*> devices = device_mgr->ListDevices();
 
   for (Device* device : devices) {
-    AllocatorStats stats;
     auto* allocator = device->GetAllocator(AllocatorAttributes());
     if (!allocator->TracksAllocationSizes()) {
       return Status(error::INVALID_ARGUMENT,
