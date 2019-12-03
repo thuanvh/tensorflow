@@ -32,6 +32,22 @@ string BuildGraphOptions::DebugString() const {
   for (auto& s : callable_options.target()) {
     strings::StrAppend(&rv, s, ", ");
   }
+  if (collective_graph_key != kNoCollectiveGraphKey) {
+    strings::StrAppend(&rv, "\ncollective_graph_key: ", collective_graph_key);
+  }
+  string collective_order_str;
+  switch (collective_order) {
+    case GraphCollectiveOrder::kNone:
+      collective_order_str = "none";
+      break;
+    case GraphCollectiveOrder::kEdges:
+      collective_order_str = "edges";
+      break;
+    case GraphCollectiveOrder::kAttrs:
+      collective_order_str = "attrs";
+      break;
+  }
+  strings::StrAppend(&rv, "\ncollective_order: ", collective_order_str);
   return rv;
 }
 

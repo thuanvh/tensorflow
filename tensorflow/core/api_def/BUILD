@@ -4,17 +4,25 @@
 # The following targets can be used to access ApiDefs:
 #   :base_api_def
 #   :python_api_def
-
-package(
-    default_visibility = ["//visibility:private"],
-)
-
-licenses(["notice"])  # Apache 2.0
+#   :java_api_def
 
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_binary",
     "tf_cc_test",
+)
+load(
+    "//third_party/mkl:build_defs.bzl",
+    "if_mkl",
+)
+load(
+    "@local_config_tensorrt//:build_defs.bzl",
+    "if_tensorrt",
+)
+
+package(
+    default_visibility = ["//visibility:private"],
+    licenses = ["notice"],  # Apache 2.0
 )
 
 filegroup(
@@ -29,10 +37,17 @@ filegroup(
     visibility = ["//tensorflow:internal"],
 )
 
+filegroup(
+    name = "java_api_def",
+    srcs = glob(["java_api/*"]),
+    visibility = ["//tensorflow:internal"],
+)
+
 cc_library(
     name = "excluded_ops_lib",
     srcs = ["excluded_ops.cc"],
     hdrs = ["excluded_ops.h"],
+    copts = if_mkl(["-DINTEL_MKL=1"]) + if_tensorrt(["-DGOOGLE_TENSORRT=1"]),
 )
 
 cc_library(

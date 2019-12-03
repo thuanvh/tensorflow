@@ -35,7 +35,7 @@ class LegacyVar : public ResourceBase {
   mutex* mu() { return &mu_; }
   Tensor* tensor() { return &tensor_; }
 
-  string DebugString() override {
+  string DebugString() const override {
     return strings::StrCat(DataTypeString(tensor_.dtype()), "/",
                            tensor_.shape().DebugString());
   }
@@ -73,9 +73,6 @@ void VariableOp::Compute(OpKernelContext* ctx) {
   // here is valid because it owns a ref on var.
   ctx->set_output_ref(0, var->mu(), var->tensor());
   if (ctx->track_allocations() && var->tensor()->IsInitialized()) {
-    AllocatorAttributes attr;
-    attr.set_gpu_compatible(true);
-    attr.set_nic_compatible(true);
     ctx->record_persistent_memory_allocation(var->tensor()->AllocatedBytes());
   }
   var->Unref();
@@ -119,7 +116,7 @@ class TemporaryVariableOp : public OpKernel {
     mutex mu;
     Tensor val;
     string name;
-    string DebugString() override { return name; }
+    string DebugString() const override { return name; }
     ~TmpVar() override { VLOG(3) << "TmpVar " << name << " deleted"; }
   };
 
@@ -212,7 +209,7 @@ TF_CALL_GPU_NUMBER_TYPES_NO_HALF(REGISTER_SYCL_KERNEL);
 #undef REGISTER_SYCL_KERNEL
 #endif  // TENSORFLOW_USE_SYCL
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 // Only register 'Variable' on GPU for the subset of types also supported by
 // 'Assign' (see dense_update_ops.cc.)
 #define REGISTER_GPU_KERNELS(type)                                         \
@@ -239,6 +236,6 @@ TF_CALL_GPU_NUMBER_TYPES_NO_HALF(REGISTER_SYCL_KERNEL);
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU_KERNELS);
 TF_CALL_int64(REGISTER_GPU_KERNELS);
 #undef REGISTER_GPU_KERNELS
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 }  // namespace tensorflow

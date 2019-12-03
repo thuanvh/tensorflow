@@ -24,18 +24,24 @@ import os
 import numpy as np
 
 from tensorflow.python.keras.utils.data_utils import get_file
-from tensorflow.python.util.tf_export import tf_export
+from tensorflow.python.util.tf_export import keras_export
 
 
-@tf_export('keras.datasets.fashion_mnist.load_data')
+@keras_export('keras.datasets.fashion_mnist.load_data')
 def load_data():
   """Loads the Fashion-MNIST dataset.
 
   Returns:
       Tuple of Numpy arrays: `(x_train, y_train), (x_test, y_test)`.
+
+  License:
+      The copyright for Fashion-MNIST is held by Zalando SE.
+      Fashion-MNIST is licensed under the [MIT license](
+      https://github.com/zalandoresearch/fashion-mnist/blob/master/LICENSE).
+
   """
   dirname = os.path.join('datasets', 'fashion-mnist')
-  base = 'http://fashion-mnist.s3-website.eu-central-1.amazonaws.com/'
+  base = 'https://storage.googleapis.com/tensorflow/tf-keras-datasets/'
   files = [
       'train-labels-idx1-ubyte.gz', 'train-images-idx3-ubyte.gz',
       't10k-labels-idx1-ubyte.gz', 't10k-images-idx3-ubyte.gz'

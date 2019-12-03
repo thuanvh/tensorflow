@@ -22,14 +22,14 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/kernels/bounds_check.h"
-#include "tensorflow/core/kernels/concat_lib.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -76,11 +76,10 @@ class PackOp : public XlaOpKernel {
 
     for (int i = 0; i < num; ++i) {
       // Reshape the inputs to have an extra dimension of size 1.
-      reshaped_inputs[i] =
-          ctx->builder()->Reshape(values[i], child_shape.dim_sizes());
+      reshaped_inputs[i] = xla::Reshape(values[i], child_shape.dim_sizes());
     }
 
-    ctx->SetOutput(0, ctx->builder()->ConcatInDim(reshaped_inputs, axis));
+    ctx->SetOutput(0, xla::ConcatInDim(ctx->builder(), reshaped_inputs, axis));
   }
 
  private:

@@ -23,6 +23,7 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/kernels/boosted_trees/boosted_trees.pb.h"
 #include "tensorflow/core/kernels/boosted_trees/resources.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/refcount.h"
@@ -34,6 +35,20 @@ limitations under the License.
 #include "tensorflow/core/util/work_sharder.h"
 
 namespace tensorflow {
+
+static void ConvertVectorsToMatrices(
+    const OpInputList bucketized_features_list,
+    std::vector<tensorflow::TTypes<int32>::ConstMatrix>& bucketized_features) {
+  for (const Tensor& tensor : bucketized_features_list) {
+    if (tensor.dims() == 1) {
+      const auto v = tensor.vec<int32>();
+      bucketized_features.emplace_back(
+          TTypes<int32>::ConstMatrix(v.data(), v.size(), 1));
+    } else {
+      bucketized_features.emplace_back(tensor.matrix<int32>());
+    }
+  }
+}
 
 // The Op used during training time to get the predictions so far with the
 // current ensemble being built.
@@ -47,29 +62,22 @@ class BoostedTreesTrainingPredictOp : public OpKernel {
                                              &num_bucketized_features_));
     OP_REQUIRES_OK(context,
                    context->GetAttr("logits_dimension", &logits_dimension_));
-    OP_REQUIRES(context, logits_dimension_ == 1,
-                errors::InvalidArgument(
-                    "Currently only one dimensional outputs are supported."));
   }
 
   void Compute(OpKernelContext* const context) override {
-    BoostedTreesEnsembleResource* resource;
+    core::RefCountPtr<BoostedTreesEnsembleResource> resource;
     // Get the resource.
     OP_REQUIRES_OK(context, LookupResource(context, HandleFromInput(context, 0),
                                            &resource));
-    // Release the reference to the resource once we're done using it.
-    core::ScopedUnref unref_me(resource);
 
     // Get the inputs.
     OpInputList bucketized_features_list;
     OP_REQUIRES_OK(context, context->input_list("bucketized_features",
                                                 &bucketized_features_list));
-    std::vector<tensorflow::TTypes<int32>::ConstVec> batch_bucketized_features;
-    batch_bucketized_features.reserve(bucketized_features_list.size());
-    for (const Tensor& tensor : bucketized_features_list) {
-      batch_bucketized_features.emplace_back(tensor.vec<int32>());
-    }
-    const int batch_size = batch_bucketized_features[0].size();
+    std::vector<tensorflow::TTypes<int32>::ConstMatrix> bucketized_features;
+    bucketized_features.reserve(bucketized_features_list.size());
+    ConvertVectorsToMatrices(bucketized_features_list, bucketized_features);
+    const int batch_size = bucketized_features[0].dimension(0);
 
     const Tensor* cached_tree_ids_t;
     OP_REQUIRES_OK(context,
@@ -103,41 +111,54 @@ class BoostedTreesTrainingPredictOp : public OpKernel {
     const int32 latest_tree = resource->num_trees() - 1;
 
     if (latest_tree < 0) {
-      // Ensemble was empty. Nothing changes.
-      output_node_ids = cached_node_ids;
+      // Ensemble was empty. Output the very first node.
+      output_node_ids.setZero();
       output_tree_ids = cached_tree_ids;
       // All the predictions are zeros.
       output_partial_logits.setZero();
     } else {
       output_tree_ids.setConstant(latest_tree);
-      auto do_work = [&resource, &batch_bucketized_features, &cached_tree_ids,
+      auto do_work = [&resource, &bucketized_features, &cached_tree_ids,
                       &cached_node_ids, &output_partial_logits,
-                      &output_node_ids, batch_size,
-                      latest_tree](int32 start, int32 end) {
+                      &output_node_ids, latest_tree,
+                      this](int32 start, int32 end) {
         for (int32 i = start; i < end; ++i) {
           int32 tree_id = cached_tree_ids(i);
           int32 node_id = cached_node_ids(i);
-          float partial_tree_logit = 0.0;
+          std::vector<float> partial_tree_logits(logits_dimension_, 0.0);
 
-          // If the tree was pruned, returns the node id into which the
-          // current_node_id was pruned, as well the correction of the cached
-          // logit prediction.
-          resource->GetPostPruneCorrection(tree_id, node_id, &node_id,
-                                           &partial_tree_logit);
-
-          // Logic in the loop adds the cached node value again if it is a leaf.
-          // If it is not a leaf anymore we need to subtract the old node's
-          // value. The following logic handles both of these cases.
-          partial_tree_logit -= resource->node_value(tree_id, node_id);
-          float partial_all_logit = 0.0;
+          if (node_id >= 0) {
+            // If the tree was pruned, returns the node id into which the
+            // current_node_id was pruned, as well the correction of the cached
+            // logit prediction.
+            resource->GetPostPruneCorrection(tree_id, node_id, &node_id,
+                                             &partial_tree_logits);
+            // Logic in the loop adds the cached node value again if it is a
+            // leaf. If it is not a leaf anymore we need to subtract the old
+            // node's value. The following logic handles both of these cases.
+            const auto& node_logits = resource->node_value(tree_id, node_id);
+            if (!node_logits.empty()) {
+              DCHECK_EQ(node_logits.size(), logits_dimension_);
+              for (int32 j = 0; j < logits_dimension_; ++j) {
+                partial_tree_logits[j] -= node_logits[j];
+              }
+            }
+          } else {
+            // No cache exists, start from the very first node.
+            node_id = 0;
+          }
+          std::vector<float> partial_all_logits(logits_dimension_, 0.0);
           while (true) {
             if (resource->is_leaf(tree_id, node_id)) {
-              partial_tree_logit += resource->node_value(tree_id, node_id);
-
+              const auto& leaf_logits = resource->node_value(tree_id, node_id);
+              DCHECK_EQ(leaf_logits.size(), logits_dimension_);
               // Tree is done
-              partial_all_logit +=
-                  resource->GetTreeWeight(tree_id) * partial_tree_logit;
-              partial_tree_logit = 0.0;
+              const float tree_weight = resource->GetTreeWeight(tree_id);
+              for (int32 j = 0; j < logits_dimension_; ++j) {
+                partial_all_logits[j] +=
+                    tree_weight * (partial_tree_logits[j] + leaf_logits[j]);
+                partial_tree_logits[j] = 0;
+              }
               // Stop if it was the latest tree.
               if (tree_id == latest_tree) {
                 break;
@@ -146,12 +167,14 @@ class BoostedTreesTrainingPredictOp : public OpKernel {
               ++tree_id;
               node_id = 0;
             } else {
-              node_id = resource->next_node(tree_id, node_id, i,
-                                            batch_bucketized_features);
+              node_id =
+                  resource->next_node(tree_id, node_id, i, bucketized_features);
             }
           }
           output_node_ids(i) = node_id;
-          output_partial_logits(i, 0) = partial_all_logit;
+          for (int32 j = 0; j < logits_dimension_; ++j) {
+            output_partial_logits(i, j) = partial_all_logits[j];
+          }
         }
       };
       // 30 is the magic number. The actual value might be a function of (the
@@ -182,29 +205,22 @@ class BoostedTreesPredictOp : public OpKernel {
                                              &num_bucketized_features_));
     OP_REQUIRES_OK(context,
                    context->GetAttr("logits_dimension", &logits_dimension_));
-    OP_REQUIRES(context, logits_dimension_ == 1,
-                errors::InvalidArgument(
-                    "Currently only one dimensional outputs are supported."));
   }
 
   void Compute(OpKernelContext* const context) override {
-    BoostedTreesEnsembleResource* resource;
+    core::RefCountPtr<BoostedTreesEnsembleResource> resource;
     // Get the resource.
     OP_REQUIRES_OK(context, LookupResource(context, HandleFromInput(context, 0),
                                            &resource));
-    // Release the reference to the resource once we're done using it.
-    core::ScopedUnref unref_me(resource);
 
     // Get the inputs.
     OpInputList bucketized_features_list;
     OP_REQUIRES_OK(context, context->input_list("bucketized_features",
                                                 &bucketized_features_list));
-    std::vector<tensorflow::TTypes<int32>::ConstVec> batch_bucketized_features;
-    batch_bucketized_features.reserve(bucketized_features_list.size());
-    for (const Tensor& tensor : bucketized_features_list) {
-      batch_bucketized_features.emplace_back(tensor.vec<int32>());
-    }
-    const int batch_size = batch_bucketized_features[0].size();
+    std::vector<tensorflow::TTypes<int32>::ConstMatrix> bucketized_features;
+    bucketized_features.reserve(bucketized_features_list.size());
+    ConvertVectorsToMatrices(bucketized_features_list, bucketized_features);
+    const int batch_size = bucketized_features[0].dimension(0);
 
     // Allocate outputs.
     Tensor* output_logits_t = nullptr;
@@ -219,38 +235,42 @@ class BoostedTreesPredictOp : public OpKernel {
       return;
     }
 
-    const int32 latest_tree = resource->num_trees() - 1;
-
-    auto do_work = [&resource, &batch_bucketized_features, &output_logits,
-                    batch_size, latest_tree](int32 start, int32 end) {
+    const int32 last_tree = resource->num_trees() - 1;
+    auto do_work = [&resource, &bucketized_features, &output_logits, last_tree,
+                    this](int32 start, int32 end) {
       for (int32 i = start; i < end; ++i) {
-        float tree_logit = 0.0;
+        std::vector<float> tree_logits(logits_dimension_, 0.0);
         int32 tree_id = 0;
         int32 node_id = 0;
         while (true) {
           if (resource->is_leaf(tree_id, node_id)) {
-            tree_logit += resource->GetTreeWeight(tree_id) *
-                          resource->node_value(tree_id, node_id);
-
-            // Stop if it was the latest tree.
-            if (tree_id == latest_tree) {
+            const float tree_weight = resource->GetTreeWeight(tree_id);
+            const auto& leaf_logits = resource->node_value(tree_id, node_id);
+            DCHECK_EQ(leaf_logits.size(), logits_dimension_);
+            for (int32 j = 0; j < logits_dimension_; ++j) {
+              tree_logits[j] += tree_weight * leaf_logits[j];
+            }
+            // Stop if it was the last tree.
+            if (tree_id == last_tree) {
               break;
             }
             // Move onto other trees.
             ++tree_id;
             node_id = 0;
           } else {
-            node_id = resource->next_node(tree_id, node_id, i,
-                                          batch_bucketized_features);
+            node_id =
+                resource->next_node(tree_id, node_id, i, bucketized_features);
           }
         }
-        output_logits(i, 0) = tree_logit;
+        for (int32 j = 0; j < logits_dimension_; ++j) {
+          output_logits(i, j) = tree_logits[j];
+        }
       }
     };
     // 10 is the magic number. The actual number might depend on (the number of
     // layers in the trees) and (cpu cycles spent on each layer), but this
     // value would work for many cases. May be tuned later.
-    const int64 cost = (latest_tree + 1) * 10;
+    const int64 cost = (last_tree + 1) * 10;
     thread::ThreadPool* const worker_threads =
         context->device()->tensorflow_cpu_worker_threads()->workers;
     Shard(worker_threads->NumThreads(), worker_threads, batch_size,
@@ -265,5 +285,121 @@ class BoostedTreesPredictOp : public OpKernel {
 
 REGISTER_KERNEL_BUILDER(Name("BoostedTreesPredict").Device(DEVICE_CPU),
                         BoostedTreesPredictOp);
+
+// The Op that returns debugging/model interpretability outputs for each
+// example. Currently it outputs the split feature ids and logits after each
+// split along the decision path for each example. This will be used to compute
+// directional feature contributions at predict time for an arbitrary activation
+// function.
+// TODO(crawles): return in proto 1) Node IDs for ensemble prediction path
+// 2) Leaf node IDs.
+class BoostedTreesExampleDebugOutputsOp : public OpKernel {
+ public:
+  explicit BoostedTreesExampleDebugOutputsOp(
+      OpKernelConstruction* const context)
+      : OpKernel(context) {
+    OP_REQUIRES_OK(context, context->GetAttr("num_bucketized_features",
+                                             &num_bucketized_features_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("logits_dimension", &logits_dimension_));
+    OP_REQUIRES(context, logits_dimension_ == 1,
+                errors::InvalidArgument(
+                    "Currently only one dimensional outputs are supported."));
+  }
+
+  void Compute(OpKernelContext* const context) override {
+    core::RefCountPtr<BoostedTreesEnsembleResource> resource;
+    // Get the resource.
+    OP_REQUIRES_OK(context, LookupResource(context, HandleFromInput(context, 0),
+                                           &resource));
+
+    // Get the inputs.
+    OpInputList bucketized_features_list;
+    OP_REQUIRES_OK(context, context->input_list("bucketized_features",
+                                                &bucketized_features_list));
+    std::vector<tensorflow::TTypes<int32>::ConstMatrix> bucketized_features;
+    bucketized_features.reserve(bucketized_features_list.size());
+    ConvertVectorsToMatrices(bucketized_features_list, bucketized_features);
+    const int batch_size = bucketized_features[0].dimension(0);
+
+    // We need to get the feature ids used for splitting and the logits after
+    // each split. We will use these to calculate the changes in the prediction
+    // (contributions) for an arbitrary activation function (done in Python) and
+    // attribute them to the associated feature ids. We will store these in
+    // a proto below.
+    Tensor* output_debug_info_t = nullptr;
+    OP_REQUIRES_OK(
+        context, context->allocate_output("examples_debug_outputs_serialized",
+                                          {batch_size}, &output_debug_info_t));
+    // Will contain serialized protos, per example.
+    auto output_debug_info = output_debug_info_t->flat<tstring>();
+    const int32 last_tree = resource->num_trees() - 1;
+
+    // For each given example, traverse through all trees keeping track of the
+    // features used to split and the associated logits at each point along the
+    // path. Note: feature_ids has one less value than logits_path because the
+    // first value of each logit path will be the bias.
+    auto do_work = [&resource, &bucketized_features, &output_debug_info,
+                    last_tree](int32 start, int32 end) {
+      for (int32 i = start; i < end; ++i) {
+        // Proto to store debug outputs, per example.
+        boosted_trees::DebugOutput example_debug_info;
+        // Initial bias prediction. E.g., prediction based off training mean.
+        const auto& tree_logits = resource->node_value(0, 0);
+        DCHECK_EQ(tree_logits.size(), 1);
+        float tree_logit = resource->GetTreeWeight(0) * tree_logits[0];
+        example_debug_info.add_logits_path(tree_logit);
+        int32 node_id = 0;
+        int32 tree_id = 0;
+        int32 feature_id;
+        float past_trees_logit = 0;  // Sum of leaf logits from prior trees.
+        // Go through each tree and populate proto.
+        while (tree_id <= last_tree) {
+          if (resource->is_leaf(tree_id, node_id)) {  // Move onto other trees.
+            // Accumulate tree_logits only if the leaf is non-root, but do so
+            // for bias tree.
+            if (tree_id == 0 || node_id > 0) {
+              past_trees_logit += tree_logit;
+            }
+            ++tree_id;
+            node_id = 0;
+          } else {  // Add to proto.
+            // Feature id used to split.
+            feature_id = resource->feature_id(tree_id, node_id);
+            example_debug_info.add_feature_ids(feature_id);
+            // Get logit after split.
+            node_id =
+                resource->next_node(tree_id, node_id, i, bucketized_features);
+            const auto& tree_logits = resource->node_value(tree_id, node_id);
+            DCHECK_EQ(tree_logits.size(), 1);
+            tree_logit = resource->GetTreeWeight(tree_id) * tree_logits[0];
+            // Output logit incorporates sum of leaf logits from prior trees.
+            example_debug_info.add_logits_path(tree_logit + past_trees_logit);
+          }
+        }
+        // Set output as serialized proto containing debug info.
+        string serialized = example_debug_info.SerializeAsString();
+        output_debug_info(i) = serialized;
+      }
+    };
+
+    // 10 is the magic number. The actual number might depend on (the number of
+    // layers in the trees) and (cpu cycles spent on each layer), but this
+    // value would work for many cases. May be tuned later.
+    const int64 cost = (last_tree + 1) * 10;
+    thread::ThreadPool* const worker_threads =
+        context->device()->tensorflow_cpu_worker_threads()->workers;
+    Shard(worker_threads->NumThreads(), worker_threads, batch_size,
+          /*cost_per_unit=*/cost, do_work);
+  }
+
+ private:
+  int32 logits_dimension_;  // Indicates dimension of logits in the tree nodes.
+  int32 num_bucketized_features_;  // Indicates the number of features.
+};
+
+REGISTER_KERNEL_BUILDER(
+    Name("BoostedTreesExampleDebugOutputs").Device(DEVICE_CPU),
+    BoostedTreesExampleDebugOutputsOp);
 
 }  // namespace tensorflow

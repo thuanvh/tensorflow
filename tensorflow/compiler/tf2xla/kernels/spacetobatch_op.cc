@@ -16,16 +16,17 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
 
 namespace tensorflow {
 namespace {
 
 void SpaceToBatch(XlaOpKernelContext* ctx, const xla::XlaOp& input,
                   DataType input_dtype, const TensorShape& input_tensor_shape,
-                  gtl::ArraySlice<int64> block_shape,
+                  absl::Span<const int64> block_shape,
                   const xla::Literal& paddings) {
   const int input_rank = input_tensor_shape.dims();
-  const gtl::InlinedVector<int64, 4> input_shape =
+  const absl::InlinedVector<int64, 4> input_shape =
       input_tensor_shape.dim_sizes();
   const int block_rank = block_shape.size();
 
@@ -33,12 +34,12 @@ void SpaceToBatch(XlaOpKernelContext* ctx, const xla::XlaOp& input,
       ctx, input_rank >= 1 + block_rank,
       errors::InvalidArgument("input rank should be >= ", 1 + block_rank,
                               " instead of ", input_rank));
-  gtl::ArraySlice<int64> remainder_shape(input_shape);
+  absl::Span<const int64> remainder_shape(input_shape);
   remainder_shape.remove_prefix(1 + block_rank);
 
   OP_REQUIRES(
       ctx,
-      xla::ShapeUtil::Rank(paddings.shape()) == 2 &&
+      paddings.shape().rank() == 2 &&
           block_rank == xla::ShapeUtil::GetDimension(paddings.shape(), 0) &&
           2 == xla::ShapeUtil::GetDimension(paddings.shape(), 1),
       errors::InvalidArgument("paddings should have shape [", block_rank,
@@ -73,7 +74,7 @@ void SpaceToBatch(XlaOpKernelContext* ctx, const xla::XlaOp& input,
                   "The product of the block dimensions must be positive"));
 
   xla::XlaOp padded =
-      b->Pad(input, XlaHelpers::Zero(b, input_dtype), padding_config);
+      xla::Pad(input, XlaHelpers::Zero(b, input_dtype), padding_config);
 
   // 2. Reshape `padded` to `reshaped_padded` of shape:
   //
@@ -100,7 +101,7 @@ void SpaceToBatch(XlaOpKernelContext* ctx, const xla::XlaOp& input,
   std::copy(remainder_shape.begin(), remainder_shape.end(),
             reshaped_padded_shape.begin() + 1 + 2 * block_rank);
 
-  xla::XlaOp reshaped_padded = b->Reshape(padded, reshaped_padded_shape);
+  xla::XlaOp reshaped_padded = xla::Reshape(padded, reshaped_padded_shape);
 
   // 3. Permute dimensions of `reshaped_padded` to produce
   //    `permuted_reshaped_padded` of shape:
@@ -120,7 +121,7 @@ void SpaceToBatch(XlaOpKernelContext* ctx, const xla::XlaOp& input,
   std::iota(permutation.begin() + 1 + block_rank * 2, permutation.end(),
             1 + block_rank * 2);
   xla::XlaOp permuted_reshaped_padded =
-      b->Transpose(reshaped_padded, permutation);
+      xla::Transpose(reshaped_padded, permutation);
 
   // 4. Reshape `permuted_reshaped_padded` to flatten `block_shape` into the
   //    batch dimension, producing an output tensor of shape:
@@ -140,7 +141,7 @@ void SpaceToBatch(XlaOpKernelContext* ctx, const xla::XlaOp& input,
   std::copy(remainder_shape.begin(), remainder_shape.end(),
             output_shape.begin() + 1 + block_rank);
 
-  xla::XlaOp output = b->Reshape(permuted_reshaped_padded, output_shape);
+  xla::XlaOp output = xla::Reshape(permuted_reshaped_padded, output_shape);
   ctx->SetOutput(0, output);
 }
 
@@ -160,8 +161,8 @@ class SpaceToBatchNDOp : public XlaOpKernel {
   }
 };
 REGISTER_XLA_OP(Name("SpaceToBatchND")
-                    .CompileTimeConstInput("paddings")
-                    .CompileTimeConstInput("block_shape"),
+                    .CompileTimeConstantInput("paddings")
+                    .CompileTimeConstantInput("block_shape"),
                 SpaceToBatchNDOp);
 
 class SpaceToBatchOp : public XlaOpKernel {
@@ -184,7 +185,7 @@ class SpaceToBatchOp : public XlaOpKernel {
  private:
   int block_size_;
 };
-REGISTER_XLA_OP(Name("SpaceToBatch").CompileTimeConstInput("paddings"),
+REGISTER_XLA_OP(Name("SpaceToBatch").CompileTimeConstantInput("paddings"),
                 SpaceToBatchOp);
 
 }  // namespace

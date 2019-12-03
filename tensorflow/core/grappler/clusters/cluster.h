@@ -65,9 +65,15 @@ class Cluster {
   // with reftype input(s) which are from CPU.
   void AllowSoftPlacement(bool soft_placement_state);
 
+  // Update the number of inter-op threads for each per-session threadpool
+  void SetNumInterOpThreads(int num_threads);
+
   // Set the number of steps required to warmup TensorFlow. Must be called
   // before Provision().
   void SetNumWarmupSteps(int num_steps);
+
+  // Set executor type to instantiate
+  void SetExecutorType(const string* executor_type);
 
   // Returns the number of warmup steps.
   int NumWarmupSteps() const;
@@ -95,7 +101,7 @@ class Cluster {
 
   // The DeviceSet is not always available, but when it is it contains a
   // superset of the devices listed in GetDevices/GetDeviceNames().
-  const DeviceSet* GetDeviceSet() const { return device_set_; }
+  virtual const DeviceSet* GetDeviceSet() const { return nullptr; }
 
   // Enables collecting the allocator stats. Call with enable=true must be made
   // before Provision().
@@ -122,9 +128,13 @@ class Cluster {
                      const std::vector<string>& fetch,
                      RunMetadata* metadata) = 0;
 
+  // Run the specified GrapplerItem and return the corresponding metadata.
+  virtual Status Run(const GrapplerItem& item, RunMetadata* metadata) {
+    return Run(item.graph, item.feed, item.fetch, metadata);
+  }
+
  protected:
   std::unordered_map<string, DeviceProperties> devices_;
-  const DeviceSet* device_set_ = nullptr;  // Not owned
   const int timeout_s_;
   SessionOptions options_;
   RunOptions run_options_;

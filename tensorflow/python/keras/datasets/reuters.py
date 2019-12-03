@@ -25,10 +25,10 @@ import numpy as np
 from tensorflow.python.keras.preprocessing.sequence import _remove_long_seq
 from tensorflow.python.keras.utils.data_utils import get_file
 from tensorflow.python.platform import tf_logging as logging
-from tensorflow.python.util.tf_export import tf_export
+from tensorflow.python.util.tf_export import keras_export
 
 
-@tf_export('keras.datasets.reuters.load_data')
+@keras_export('keras.datasets.reuters.load_data')
 def load_data(path='reuters.npz',
               num_words=None,
               skip_top=0,
@@ -75,11 +75,13 @@ def load_data(path='reuters.npz',
   if kwargs:
     raise TypeError('Unrecognized keyword arguments: ' + str(kwargs))
 
+  origin_folder = 'https://storage.googleapis.com/tensorflow/tf-keras-datasets/'
   path = get_file(
       path,
-      origin='https://s3.amazonaws.com/text-datasets/reuters.npz',
-      file_hash='87aedbeb0cb229e378797a632c1997b6')
-  with np.load(path) as f:
+      origin=origin_folder + 'reuters.npz',
+      file_hash=
+      'd6586e694ee56d7a4e65172e12b3e987c03096cb01eab99753921ef915959916')
+  with np.load(path, allow_pickle=True) as f:
     xs, labels = f['x'], f['y']
 
   np.random.seed(seed)
@@ -114,7 +116,7 @@ def load_data(path='reuters.npz',
   return (x_train, y_train), (x_test, y_test)
 
 
-@tf_export('keras.datasets.reuters.get_word_index')
+@keras_export('keras.datasets.reuters.get_word_index')
 def get_word_index(path='reuters_word_index.json'):
   """Retrieves the dictionary mapping word indices back to words.
 
@@ -124,11 +126,10 @@ def get_word_index(path='reuters_word_index.json'):
   Returns:
       The word index dictionary.
   """
+  origin_folder = 'https://storage.googleapis.com/tensorflow/tf-keras-datasets/'
   path = get_file(
       path,
-      origin='https://s3.amazonaws.com/text-datasets/reuters_word_index.json',
+      origin=origin_folder + 'reuters_word_index.json',
       file_hash='4d44cc38712099c9e383dc6e5f11a921')
-  f = open(path)
-  data = json.load(f)
-  f.close()
-  return data
+  with open(path) as f:
+    return json.load(f)

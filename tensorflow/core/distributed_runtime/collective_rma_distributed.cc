@@ -19,6 +19,8 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/common_runtime/dma_helper.h"
 #include "tensorflow/core/common_runtime/process_util.h"
+#include "tensorflow/core/distributed_runtime/cancellable_call.h"
+#include "tensorflow/core/distributed_runtime/request_id.h"
 #include "tensorflow/core/distributed_runtime/worker_cache.h"
 #include "tensorflow/core/platform/protobuf_internal.h"
 #include "tensorflow/core/protobuf/transport_options.pb.h"
@@ -28,45 +30,6 @@ namespace tensorflow {
 
 namespace {
 
-// Supports client side cancellation of WorkerInterface calls via
-// registration with a CancellationManager.
-//
-// TODO(tucker): Maybe unify this with CancellableCall in
-// collective_param_resolver_distributed.cc.
-class CancellableCall {
- public:
-  CancellableCall(CancellationManager* cancel_mgr, const string& remote_worker,
-                  WorkerCacheInterface* wc)
-      : cancel_mgr_(cancel_mgr), remote_worker_(remote_worker), wc_(wc) {
-    wi_ = wc_->CreateWorker(remote_worker_);
-  }
-  virtual ~CancellableCall() { wc_->ReleaseWorker(remote_worker_, wi_); }
-
-  virtual void IssueCall(const StatusCallback& done) = 0;
-
-  void Start(const StatusCallback& done) {
-    CancellationToken token = cancel_mgr_->get_cancellation_token();
-    const bool not_yet_cancelled = cancel_mgr_->RegisterCallback(
-        token, [this, token]() { opts_.StartCancel(); });
-    if (not_yet_cancelled) {
-      IssueCall([this, token, done](const Status& s) {
-        cancel_mgr_->DeregisterCallback(token);
-        done(s);
-      });
-    } else {
-      done(errors::Cancelled("RPC Request was cancelled"));
-    }
-  }
-
- protected:
-  mutable mutex mu_;
-  CancellationManager* cancel_mgr_;  // Not owned
-  const string remote_worker_;
-  WorkerCacheInterface* wc_;  // Not owned
-  WorkerInterface* wi_;       // Owned by wc_, must be released.
-  CallOptions opts_;
-};
-
 class RecvBufCall : public CancellableCall {
  public:
   RecvBufCall(int64 step_id, const string& peer_device, const string& peer_task,
@@ -74,17 +37,19 @@ class RecvBufCall : public CancellableCall {
               DeviceContext* to_device_ctx,
               const AllocatorAttributes& to_alloc_attr, Tensor* to_tensor,
               const DeviceLocality& client_locality,
-              const DeviceLocality& server_locality,
+              const DeviceAttributes& server_attributes,
               CancellationManager* cancel_mgr, WorkerCacheInterface* wc)
       : CancellableCall(cancel_mgr, peer_task, wc) {
     req_.set_step_id(step_id);
     req_.set_buf_rendezvous_key(key);
     *req_.mutable_client_locality() = client_locality;
-    *req_.mutable_server_locality() = server_locality;
+    *req_.mutable_server_locality() = server_attributes.locality();
     req_.set_num_bytes(to_tensor->TotalBytes());
     req_.set_buf_ptr(reinterpret_cast<int64>(DMAHelper::base(to_tensor)));
     req_.set_src_device(peer_device);
+    req_.set_src_incarnation(server_attributes.incarnation());
     req_.set_dst_device(to_device->name());
+    req_.set_request_id(GetUniqueRequestId());
   }
 
   ~RecvBufCall() override {}
@@ -97,38 +62,53 @@ class RecvBufCall : public CancellableCall {
   RecvBufResponse resp_;
 };
 
+void PopulateTensorFromExtra(const RecvBufRespExtra& extra,
+                             Tensor* cpu_tensor) {
+  char* head = reinterpret_cast<char*>(DMAHelper::base(cpu_tensor));
+  for (const auto& tensor_content_chunk : extra.tensor_content()) {
+    memcpy(head, tensor_content_chunk.data(),
+           tensor_content_chunk.size());
+    head += tensor_content_chunk.size();
+  }
+}
 }  // namespace
 
 void CollectiveRemoteAccessDistributed::RecvFromPeer(
     const string& peer_device, const string& peer_task, bool peer_is_local,
     const string& key, Device* to_device, DeviceContext* to_device_ctx,
     const AllocatorAttributes& to_alloc_attr, Tensor* to_tensor,
-    const DeviceLocality& client_locality, const StatusCallback& done) {
+    const DeviceLocality& client_locality, int dev_to_dev_stream_index,
+    const StatusCallback& done) {
   if (peer_is_local) {
     CollectiveRemoteAccessLocal::RecvFromPeer(
         peer_device, peer_task, peer_is_local, key, to_device, to_device_ctx,
-        to_alloc_attr, to_tensor, client_locality, done);
+        to_alloc_attr, to_tensor, client_locality, dev_to_dev_stream_index,
+        done);
     return;
   }
 
   // State that needs to be threaded through a couple of async calls
   // in order to make this function completely non-blocking.
   struct State {
-    DeviceLocality server_locality;
+    DeviceAttributes server_attributes;
     std::unique_ptr<RecvBufCall> call;
   };
   State* state = new State;
 
-  // Logic to be executed on the RecvBufferAsync callback.
+  // Logic to be executed on the RecvBufAsync callback.
   auto recv_buf_callback = [this, state, peer_task, to_device, to_alloc_attr,
-                            to_device_ctx, to_tensor, done](const Status& s) {
+                            to_device_ctx, to_tensor, dev_to_dev_stream_index,
+                            done](const Status& s) {
     if (s.ok()) {
       // In this generic implementation the bytes come back in the
       // RPC response protobuf rather than via RDMA so we need to copy
       // them into the destination tensor here.
       RecvBufRespExtra extra;
       state->call->resp_.transport_options().UnpackTo(&extra);
-      int64 num_bytes = extra.tensor_content().size();
+      int64 num_bytes = 0;
+      for (const auto& chunk : extra.tensor_content()) {
+        num_bytes += chunk.size();
+      }
       if (num_bytes != to_tensor->TotalBytes()) {
         done(errors::Internal("RecvBufResponse returned ", num_bytes,
                               " bytes where to_tensor expected ",
@@ -151,25 +131,23 @@ void CollectiveRemoteAccessDistributed::RecvFromPeer(
         cpu_attr.set_gpu_compatible(true);
         Tensor* cpu_tensor = new Tensor(cpu_dev->GetAllocator(cpu_attr),
                                         to_tensor->dtype(), to_tensor->shape());
-        memcpy(DMAHelper::base(cpu_tensor), extra.tensor_content().data(),
-               num_bytes);
+        PopulateTensorFromExtra(extra, cpu_tensor);
         // Then copy it to the GPU.
         CopyTensor::ViaDMA("",  // edge name (non-existent)
                            nullptr /*send_dev_ctx*/, to_device_ctx, cpu_dev,
                            to_device, cpu_attr, to_alloc_attr, cpu_tensor,
-                           to_tensor,
+                           to_tensor, dev_to_dev_stream_index,
                            [this, cpu_tensor, done](const Status& s) {
                              delete cpu_tensor;
                              // This callback must not block, so execute
                              // done in another thread.
-                             SchedClosure([s, done] { done(s); });
+                             RunClosure([s, done] { done(s); });
                            });
         delete state;
         return;
       } else {
         // CPU device
-        memcpy(DMAHelper::base(to_tensor), extra.tensor_content().data(),
-               num_bytes);
+        PopulateTensorFromExtra(extra, to_tensor);
       }
     }
     if (!s.ok() && errors::IsFailedPrecondition(s)) {
@@ -180,25 +158,26 @@ void CollectiveRemoteAccessDistributed::RecvFromPeer(
     done(s);
   };
 
-  // Logic to execute once we have the device locality for the server-side
+  // Logic to execute once we have the device attributes for the server-side
   // device.
-  auto dev_locality_callback = [this, state, peer_device, peer_task, key,
-                                to_device, to_device_ctx, to_alloc_attr,
-                                to_tensor, client_locality,
-                                recv_buf_callback](const Status& s) {
+  auto dev_attributes_callback = [this, state, peer_device, peer_task, key,
+                                  to_device, to_device_ctx, to_alloc_attr,
+                                  to_tensor, client_locality,
+                                  recv_buf_callback](const Status& s) {
     if (!s.ok()) {
       recv_buf_callback(s);
     } else {
       state->call.reset(new RecvBufCall(
           step_id_, peer_device, peer_task, key, to_device, to_device_ctx,
-          to_alloc_attr, to_tensor, client_locality, state->server_locality,
+          to_alloc_attr, to_tensor, client_locality, state->server_attributes,
           &cancel_mgr_, worker_cache_));
       state->call->Start(recv_buf_callback);
     }
   };
 
-  dev_resolver_->GetLocalityAsync(
-      peer_device, peer_task, &state->server_locality, dev_locality_callback);
+  dev_resolver_->GetDeviceAttributesAsync(peer_device, peer_task,
+                                          &state->server_attributes,
+                                          dev_attributes_callback);
 }
 
 void CollectiveRemoteAccessDistributed::StartAbort(const Status& s) {

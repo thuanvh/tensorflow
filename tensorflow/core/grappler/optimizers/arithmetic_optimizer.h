@@ -20,6 +20,7 @@ limitations under the License.
 #include "tensorflow/core/grappler/costs/graph_properties.h"
 #include "tensorflow/core/grappler/optimizers/graph_optimizer.h"
 #include "tensorflow/core/grappler/utils.h"
+#include "tensorflow/core/lib/gtl/flatset.h"
 #include "tensorflow/core/protobuf/rewriter_config.pb.h"
 
 namespace tensorflow {
@@ -43,6 +44,8 @@ class ArithmeticOptimizer : public GraphOptimizer {
 
   string name() const override { return "arithmetic_optimizer"; };
 
+  bool UsesFunctionLibrary() const override { return false; }
+
   Status Optimize(Cluster* cluster, const GrapplerItem& item,
                   GraphDef* optimized_graph) override;
 
@@ -54,16 +57,17 @@ class ArithmeticOptimizer : public GraphOptimizer {
 
   // Granular control for arithmetic optimizer stages
   struct ArithmeticOptimizerOptions {
-    // TODO(ezhulenev): flag do disable TrySimplifyAndReplaceUses in tests.
-    // Remove when all optimizers will be migrated to separate stages.
-    bool enable_try_simplify_and_replace = true;
-
     bool combine_add_to_addn = true;
-    bool convert_sqrt_div_to_rsqrt_mul = false;
+    bool convert_sqrt_div_to_rsqrt_mul = true;
     bool dedup_computations = true;
+    bool fold_conjugate_into_transpose = true;
+    bool fold_multiply_into_conv = true;
+    bool fold_transpose_into_matmul = true;
+    bool fuse_squared_diff = true;
     bool hoist_common_factor_out_of_aggregation = true;
-    bool hoist_cwise_unary_chains = false;
+    bool hoist_cwise_unary_chains = true;
     bool minimize_broadcasts = true;
+    bool optimize_max_or_min_of_monotonic = true;
     bool remove_idempotent = true;
     bool remove_identity_transpose = true;
     bool remove_involution = true;
@@ -72,7 +76,15 @@ class ArithmeticOptimizer : public GraphOptimizer {
     bool remove_redundant_bitcast = true;
     bool remove_redundant_cast = true;
     bool remove_redundant_reshape = true;
-    bool reorder_cast_and_transpose = true;
+    bool reorder_cast_like_and_value_preserving = true;
+    bool replace_mul_with_square = true;
+    bool simplify_aggregation = true;
+    bool convert_pow = true;
+    bool convert_log1p = true;
+    bool convert_log_softmax = true;
+    bool convert_expm1 = true;
+    bool unary_ops_composition = true;
+    bool remove_stack_strided_slice_same_axis = true;
 
     // Choose which arithmetic optimizer stages will be enabled for a given
     // optimization level by default.
@@ -82,21 +94,6 @@ class ArithmeticOptimizer : public GraphOptimizer {
       return options;
     }
   };
-
-  // Returns true is a node with given name and the optimizer prefix already
-  // exists.
-  string OptimizedNodeName(const NodeDef& node, StringPiece suffix) const;
-  bool OptimizedNodeExists(const NodeDef& node, StringPiece suffix) const;
-
-  // Creates a new node in the graph, with name equal to that of node, prefixed
-  // with "ArithmeticOptimizer/" and the given suffix. Also updates node_map_,
-  // and optionally copies node into the new node if copy_node is true.
-  NodeDef* AddNode(const NodeDef& node, StringPiece suffix, bool copy_node);
-
-  // Creates a new node in the graph, prefixed with "ArithmeticOptimizer/",
-  // updates node_map_, and optionally copies *node_to_copy into the new
-  // node, if node_to_copy is not nullptr.
-  NodeDef* AddNode(const string& name, const NodeDef* node_to_copy);
 
   // Returns true if it is safe to dedup node from the graph.
   bool CanDedup(const NodeDef& node) const;
@@ -137,6 +134,7 @@ class ArithmeticOptimizer : public GraphOptimizer {
   std::unique_ptr<NodeMap> node_map_;
   std::unique_ptr<GraphProperties> graph_properties_;
   GraphDef* optimized_graph_ = nullptr;  // Not owned.
+  gtl::FlatSet<string> feed_nodes_;
 };
 
 }  // end namespace grappler

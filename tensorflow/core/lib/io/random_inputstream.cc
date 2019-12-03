@@ -30,7 +30,7 @@ RandomAccessInputStream::~RandomAccessInputStream() {
 }
 
 Status RandomAccessInputStream::ReadNBytes(int64 bytes_to_read,
-                                           string* result) {
+                                           tstring* result) {
   if (bytes_to_read < 0) {
     return errors::InvalidArgument("Cannot read negative number of bytes");
   }
@@ -45,17 +45,23 @@ Status RandomAccessInputStream::ReadNBytes(int64 bytes_to_read,
   result->resize(data.size());
   if (s.ok() || errors::IsOutOfRange(s)) {
     pos_ += data.size();
-  } else {
-    return s;
   }
-  // If the amount of data we read is less than what we wanted, we return an
-  // out of range error. We need to catch this explicitly since file_->Read()
-  // would not do so if at least 1 byte is read (b/30839063).
-  if (data.size() < bytes_to_read) {
-    return errors::OutOfRange("reached end of file");
-  }
-  return Status::OK();
+  return s;
 }
+
+#if defined(PLATFORM_GOOGLE)
+Status RandomAccessInputStream::ReadNBytes(int64 bytes_to_read,
+                                           absl::Cord* result) {
+  if (bytes_to_read < 0) {
+    return errors::InvalidArgument("Cannot read negative number of bytes");
+  }
+  Status s = file_->Read(pos_, bytes_to_read, result);
+  if (s.ok() || errors::IsOutOfRange(s)) {
+    pos_ += result->size();
+  }
+  return s;
+}
+#endif
 
 // To limit memory usage, the default implementation of SkipNBytes() only reads
 // 8MB at a time.

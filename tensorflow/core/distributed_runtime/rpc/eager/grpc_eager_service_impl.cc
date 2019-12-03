@@ -18,10 +18,8 @@ limitations under the License.
 #include "tensorflow/core/distributed_runtime/rpc/eager/grpc_eager_service.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_call.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_channel.h"
-#include "tensorflow/core/distributed_runtime/rpc/grpc_server_lib.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_util.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_worker_cache.h"
-#include "tensorflow/core/distributed_runtime/rpc/grpc_worker_service.h"
 #include "tensorflow/core/util/ptr_util.h"
 
 namespace tensorflow {
@@ -29,30 +27,42 @@ namespace eager {
 
 GrpcEagerServiceImpl::GrpcEagerServiceImpl(
     const WorkerEnv* env, ::grpc::ServerBuilder* server_builder)
-    : local_impl_(env) {
-  request_handler_threadpool_ =
-      MakeUnique<thread::ThreadPool>(env->env, "EagerServiceRequestHandler", 4);
+    : env_(env),
+      local_impl_(env),
+      enqueue_streaming_thread_(env_->env, "enqueue_streaming_thread", 1) {
   server_builder->RegisterService(&service_);
   cq_ = server_builder->AddCompletionQueue();
 }
 
-void GrpcEagerServiceImpl::DriveCQ() {
-#define ENQUEUE_REQUEST(method)                                                \
-  do {                                                                         \
-    Call<GrpcEagerServiceImpl,                                                 \
-         tensorflow::eager::grpc::EagerService::AsyncService, method##Request, \
-         method##Response>::                                                   \
-        EnqueueRequest(&service_, cq_.get(),                                   \
-                       &grpc::EagerService::AsyncService::Request##method,     \
-                       &GrpcEagerServiceImpl::method##Handler, false);         \
+Status GrpcEagerServiceImpl::CreateMasterContext(
+    const tensorflow::uint64 context_id, EagerContext* context) {
+  return local_impl_.CreateMasterContext(context_id, context);
+}
+
+void GrpcEagerServiceImpl::HandleRPCsLoop() {
+#define ENQUEUE_REQUEST(method)                                            \
+  do {                                                                     \
+    Call<GrpcEagerServiceImpl, grpc::EagerService::AsyncService,           \
+         method##Request, method##Response>::                              \
+        EnqueueRequest(&service_, cq_.get(),                               \
+                       &grpc::EagerService::AsyncService::Request##method, \
+                       &GrpcEagerServiceImpl::method##Handler, false);     \
   } while (0)
   ENQUEUE_REQUEST(CreateContext);
+  ENQUEUE_REQUEST(UpdateContext);
   ENQUEUE_REQUEST(Enqueue);
   ENQUEUE_REQUEST(WaitQueueDone);
   ENQUEUE_REQUEST(KeepAlive);
   ENQUEUE_REQUEST(CloseContext);
-  ENQUEUE_REQUEST(RegisterFunction);
 #undef ENQUEUE_REQUEST
+
+  // Request a StreamingEnqueue call.
+  ServerBidirectionalStreamingCall<GrpcEagerServiceImpl,
+                                   grpc::EagerService::AsyncService,
+                                   EnqueueRequest, EnqueueResponse>::
+      EnqueueRequest(&service_, cq_.get(),
+                     &grpc::EagerService::AsyncService::RequestStreamingEnqueue,
+                     &GrpcEagerServiceImpl::StreamingEnqueueHandler);
 
   void* tag;  // Matches the operation started against this cq_.
   bool ok;
@@ -62,8 +72,8 @@ void GrpcEagerServiceImpl::DriveCQ() {
       // The queue is shutting down.
       break;
     }
-    UntypedCall<GrpcEagerServiceImpl>::Tag* callback_tag =
-        static_cast<UntypedCall<GrpcEagerServiceImpl>::Tag*>(tag);
+    GrpcCallTag<GrpcEagerServiceImpl>* callback_tag =
+        static_cast<GrpcCallTag<GrpcEagerServiceImpl>*>(tag);
 
     if (callback_tag) {
       callback_tag->OnCompleted(this, ok);
@@ -74,12 +84,7 @@ void GrpcEagerServiceImpl::DriveCQ() {
   }
 }
 
-void GrpcEagerServiceImpl::Start() {
-  // TODO(nareshmodi) separate thread for driving CQ
-  request_handler_threadpool_->Schedule([this]() { DriveCQ(); });
-}
-
-void GrpcEagerServiceImpl::Stop() {
+void GrpcEagerServiceImpl::Shutdown() {
   // This enqueues a special event (with a null tag)
   // that causes the completion queue to be shut down on the
   // polling thread.

@@ -93,7 +93,7 @@ Status DynamicStitchShapeFunction(InferenceContext* c) {
   TF_RETURN_IF_ERROR(c->GetAttr("N", &num_partitions));
 
   bool all_indices_constant = true;
-  int32 max_index = 0;
+  int32 max_index = -1;
   ShapeHandle extra_shape = c->UnknownShape();
   for (int i = 0; i < num_partitions; ++i) {
     const Tensor* indices_t = c->input_tensor(i);
@@ -419,6 +419,7 @@ REGISTER_OP("ConditionalAccumulator")
     .Attr("shape: shape")
     .Attr("container: string = ''")
     .Attr("shared_name: string = ''")
+    .Attr("reduction_type: { 'MEAN', 'SUM' } = 'MEAN' ")
     .SetIsStateful()
     .SetShapeFn([](InferenceContext* c) {
       c->set_output(0, c->Vector(2));
@@ -450,12 +451,68 @@ REGISTER_OP("AccumulatorTakeGradient")
     })
     .Attr("dtype: numbertype");
 
+// -----------------V2 accumulators that use resource -------------------------
+
+REGISTER_OP("ResourceAccumulatorNumAccumulated")
+    .Input("handle: resource")
+    .Output("num_accumulated: int32")
+    .SetShapeFn(shape_inference::ScalarShape);
+
+REGISTER_OP("ResourceAccumulatorSetGlobalStep")
+    .Input("handle: resource")
+    .Input("new_global_step: int64")
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle unused;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &unused));
+      return Status::OK();
+    });
+
+REGISTER_OP("ResourceConditionalAccumulator")
+    .Output("handle: resource")
+    .Attr("dtype: numbertype")
+    .Attr("shape: shape")
+    .Attr("container: string = ''")
+    .Attr("shared_name: string = ''")
+    .Attr("reduction_type: { 'MEAN', 'SUM' } = 'MEAN' ")
+    .SetIsStateful()
+    .SetShapeFn([](InferenceContext* c) {
+      c->set_output(0, c->Vector(2));
+      return Status::OK();
+    });
+
+REGISTER_OP("ResourceAccumulatorApplyGradient")
+    .Input("handle: resource")
+    .Input("local_step: int64")
+    .Input("gradient: dtype")
+    .Attr("dtype: numbertype")
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle unused;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &unused));
+      return Status::OK();
+    });
+
+REGISTER_OP("ResourceAccumulatorTakeGradient")
+    .Input("handle: resource")
+    .Input("num_required: int32")
+    .Output("average: dtype")
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle unused;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &unused));
+      // Shape of output is the shape of the accumulator referenced
+      // by 'handle', but which is not available here, so we lose
+      // shape information.
+      return shape_inference::UnknownShape(c);
+    })
+    .Attr("dtype: numbertype");
+
+// TODO(nponomareva): change these all to use resources.
 REGISTER_OP("SparseConditionalAccumulator")
     .Output("handle: Ref(string)")
     .Attr("dtype: numbertype")
     .Attr("shape: shape")
     .Attr("container: string = ''")
     .Attr("shared_name: string = ''")
+    .Attr("reduction_type: { 'MEAN', 'SUM' } = 'MEAN' ")
     .SetIsStateful()
     .SetShapeFn([](InferenceContext* c) {
       c->set_output(0, c->Vector(2));
@@ -604,6 +661,50 @@ REGISTER_OP("TensorArrayGradV3")
       if (c->input_handle_shapes_and_types(0)) {
         c->set_output_handle_shapes_and_types(
             0, *c->input_handle_shapes_and_types(0));
+      }
+      return Status::OK();
+    });
+
+REGISTER_OP("TensorArrayGradWithShape")
+    .Input("handle: resource")
+    .Input("flow_in: float")
+    .Input("shape_to_prepend: int32")
+    .Output("grad_handle: resource")
+    .Output("flow_out: float")
+    .Attr("source: string")
+    .SetIsStateful()
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle handle;
+      DimensionHandle unused_dim;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 1, &handle));
+      TF_RETURN_IF_ERROR(c->WithValue(c->Dim(handle, 0), 2, &unused_dim));
+      c->set_output(0, c->Vector(2));
+      c->set_output(1, c->Scalar());
+      auto* shape_and_type = c->input_handle_shapes_and_types(0);
+      if (shape_and_type) {
+        auto input_shape = (*shape_and_type)[0].shape;
+        auto dtype = (*shape_and_type)[0].dtype;
+        // Note that shape_to_preped is a rank 1 Tensor representing a shape.
+        // The size of dimension 0 is the number of dimensions we need to add to
+        // output shape.
+        int64 prepend_rank = c->Value(c->Dim(c->input(2), 0));
+        if (c->RankKnown(input_shape) &&
+            prepend_rank != InferenceContext::kUnknownDim) {
+          int32 input_rank = c->Rank(input_shape);
+          std::vector<DimensionHandle> dims;
+          dims.reserve(prepend_rank + input_rank);
+          for (int i = 0; i < prepend_rank; ++i) {
+            dims.push_back(c->UnknownDim());
+          }
+          for (int i = 0; i < input_rank; ++i) {
+            dims.push_back(c->Dim(input_shape, i));
+          }
+          c->set_output_handle_shapes_and_types(0,
+                                                {{c->MakeShape(dims), dtype}});
+        } else {
+          c->set_output_handle_shapes_and_types(0,
+                                                {{c->UnknownShape(), dtype}});
+        }
       }
       return Status::OK();
     });

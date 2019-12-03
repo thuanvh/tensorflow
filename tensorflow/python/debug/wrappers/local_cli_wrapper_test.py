@@ -18,10 +18,13 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-import shutil
 import tempfile
 
+import numpy as np
+
+from tensorflow.python.debug.cli import cli_config
 from tensorflow.core.protobuf import config_pb2
+from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.python.client import session
 from tensorflow.python.debug.cli import cli_shared
 from tensorflow.python.debug.cli import debugger_cli_common
@@ -32,6 +35,10 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
+from tensorflow.python.lib.io import file_io
+from tensorflow.python.keras import backend
+from tensorflow.python.keras.engine import sequential
+from tensorflow.python.keras.layers import core
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
@@ -42,6 +49,7 @@ from tensorflow.python.ops import state_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import googletest
 from tensorflow.python.training import monitored_session
+from tensorflow.python.training import session_run_hook
 
 
 class LocalCLIDebuggerWrapperSessionForTest(
@@ -105,7 +113,10 @@ class LocalCLIDebuggerWrapperSessionForTest(
     else:
       self.observers["run_end_cli_run_numbers"].append(self._run_call_count)
 
-    readline_cli = ui_factory.get_ui("readline")
+    readline_cli = ui_factory.get_ui(
+        "readline",
+        config=cli_config.CLIConfig(
+            config_file_path=os.path.join(tempfile.mkdtemp(), ".tfdbg_config")))
     self._register_this_run_info(readline_cli)
 
     while True:
@@ -124,13 +135,14 @@ class LocalCLIDebuggerWrapperSessionForTest(
         return e.exit_token
 
 
+@test_util.run_v1_only("b/120545219")
 class LocalCLIDebugWrapperSessionTest(test_util.TensorFlowTestCase):
 
   def setUp(self):
     self._tmp_dir = tempfile.mktemp()
 
-    self.v = variables.Variable(10.0, name="v")
-    self.w = variables.Variable(21.0, name="w")
+    self.v = variables.VariableV1(10.0, name="v")
+    self.w = variables.VariableV1(21.0, name="w")
     self.delta = constant_op.constant(1.0, name="delta")
     self.inc_v = state_ops.assign_add(self.v, self.delta, name="inc_v")
 
@@ -149,7 +161,13 @@ class LocalCLIDebugWrapperSessionTest(test_util.TensorFlowTestCase):
         dtypes.float32, shape=([5, 5]), name="sparse_placeholder")
     self.sparse_add = sparse_ops.sparse_add(self.sparse_ph, self.sparse_ph)
 
-    self.sess = session.Session()
+    rewriter_config = rewriter_config_pb2.RewriterConfig(
+        disable_model_pruning=True,
+        arithmetic_optimization=rewriter_config_pb2.RewriterConfig.OFF,
+        dependency_optimization=rewriter_config_pb2.RewriterConfig.OFF)
+    graph_options = config_pb2.GraphOptions(rewrite_options=rewriter_config)
+    config_proto = config_pb2.ConfigProto(graph_options=graph_options)
+    self.sess = session.Session(config=config_proto)
 
     # Initialize variable.
     self.sess.run(variables.global_variables_initializer())
@@ -157,7 +175,7 @@ class LocalCLIDebugWrapperSessionTest(test_util.TensorFlowTestCase):
   def tearDown(self):
     ops.reset_default_graph()
     if os.path.isdir(self._tmp_dir):
-      shutil.rmtree(self._tmp_dir)
+      file_io.delete_recursively(self._tmp_dir)
 
   def testConstructWrapper(self):
     local_cli_wrapper.LocalCLIDebugWrapperSession(
@@ -349,7 +367,7 @@ class LocalCLIDebugWrapperSessionTest(test_util.TensorFlowTestCase):
   def testDebuggingMakeCallableTensorRunnerWorks(self):
     wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
         [["run"], ["run"]], self.sess, dump_root=self._tmp_dir)
-    v = variables.Variable(42)
+    v = variables.VariableV1(42)
     tensor_runner = wrapped_sess.make_callable(v)
     self.sess.run(v.initializer)
 
@@ -373,7 +391,7 @@ class LocalCLIDebugWrapperSessionTest(test_util.TensorFlowTestCase):
   def testDebuggingMakeCallableOperationRunnerWorks(self):
     wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
         [["run"], ["run"]], self.sess, dump_root=self._tmp_dir)
-    v = variables.Variable(10.0)
+    v = variables.VariableV1(10.0)
     inc_v = state_ops.assign_add(v, 1.0)
     op_runner = wrapped_sess.make_callable(inc_v.op)
     self.sess.run(v.initializer)
@@ -392,6 +410,115 @@ class LocalCLIDebugWrapperSessionTest(test_util.TensorFlowTestCase):
 
     self.assertAllClose(42.0, tensor_runner(41.0, 1.0))
     self.assertEqual(1, len(wrapped_sess.observers["debug_dumps"]))
+
+  def testDebuggingMakeCallableFromOptionsWithZeroFeedWorks(self):
+    variable_1 = variables.VariableV1(
+        10.5, dtype=dtypes.float32, name="variable_1")
+    a = math_ops.add(variable_1, variable_1, "callable_a")
+    math_ops.add(a, a, "callable_b")
+    self.sess.run(variable_1.initializer)
+
+    wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
+        [["run"]] * 3, self.sess, dump_root=self._tmp_dir)
+    callable_options = config_pb2.CallableOptions()
+    callable_options.fetch.append("callable_b")
+    sess_callable = wrapped_sess._make_callable_from_options(callable_options)
+
+    for _ in range(2):
+      callable_output = sess_callable()
+      self.assertAllClose(np.array(42.0, dtype=np.float32), callable_output[0])
+
+    debug_dumps = wrapped_sess.observers["debug_dumps"]
+    self.assertEqual(2, len(debug_dumps))
+    for debug_dump in debug_dumps:
+      node_names = [datum.node_name for datum in debug_dump.dumped_tensor_data]
+      self.assertItemsEqual(
+          ["callable_a", "callable_b", "variable_1", "variable_1/read"],
+          node_names)
+
+  def testDebuggingMakeCallableFromOptionsWithOneFeedWorks(self):
+    ph1 = array_ops.placeholder(dtypes.float32, name="callable_ph1")
+    a = math_ops.add(ph1, ph1, "callable_a")
+    math_ops.add(a, a, "callable_b")
+
+    wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
+        [["run"]] * 3, self.sess, dump_root=self._tmp_dir)
+    callable_options = config_pb2.CallableOptions()
+    callable_options.feed.append("callable_ph1")
+    callable_options.fetch.append("callable_b")
+    sess_callable = wrapped_sess._make_callable_from_options(callable_options)
+
+    ph1_value = np.array([10.5, -10.5], dtype=np.float32)
+
+    for _ in range(2):
+      callable_output = sess_callable(ph1_value)
+      self.assertAllClose(
+          np.array([42.0, -42.0], dtype=np.float32), callable_output[0])
+
+    debug_dumps = wrapped_sess.observers["debug_dumps"]
+    self.assertEqual(2, len(debug_dumps))
+    for debug_dump in debug_dumps:
+      node_names = [datum.node_name for datum in debug_dump.dumped_tensor_data]
+      self.assertIn("callable_a", node_names)
+      self.assertIn("callable_b", node_names)
+
+  def testDebuggingMakeCallableFromOptionsWithTwoFeedsWorks(self):
+    ph1 = array_ops.placeholder(dtypes.float32, name="callable_ph1")
+    ph2 = array_ops.placeholder(dtypes.float32, name="callable_ph2")
+    a = math_ops.add(ph1, ph2, "callable_a")
+    math_ops.add(a, a, "callable_b")
+
+    wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
+        [["run"]] * 3, self.sess, dump_root=self._tmp_dir)
+    callable_options = config_pb2.CallableOptions()
+    callable_options.feed.append("callable_ph1")
+    callable_options.feed.append("callable_ph2")
+    callable_options.fetch.append("callable_b")
+    sess_callable = wrapped_sess._make_callable_from_options(callable_options)
+
+    ph1_value = np.array(5.0, dtype=np.float32)
+    ph2_value = np.array(16.0, dtype=np.float32)
+
+    for _ in range(2):
+      callable_output = sess_callable(ph1_value, ph2_value)
+      self.assertAllClose(np.array(42.0, dtype=np.float32), callable_output[0])
+
+    debug_dumps = wrapped_sess.observers["debug_dumps"]
+    self.assertEqual(2, len(debug_dumps))
+    for debug_dump in debug_dumps:
+      node_names = [datum.node_name for datum in debug_dump.dumped_tensor_data]
+      self.assertIn("callable_a", node_names)
+      self.assertIn("callable_b", node_names)
+
+  def testDebugMakeCallableFromOptionsWithCustomOptionsAndMetadataWorks(self):
+    variable_1 = variables.VariableV1(
+        10.5, dtype=dtypes.float32, name="variable_1")
+    a = math_ops.add(variable_1, variable_1, "callable_a")
+    math_ops.add(a, a, "callable_b")
+    self.sess.run(variable_1.initializer)
+
+    wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
+        [["run"], ["run"]], self.sess, dump_root=self._tmp_dir)
+    callable_options = config_pb2.CallableOptions()
+    callable_options.fetch.append("callable_b")
+    callable_options.run_options.trace_level = config_pb2.RunOptions.FULL_TRACE
+
+    sess_callable = wrapped_sess._make_callable_from_options(callable_options)
+
+    run_metadata = config_pb2.RunMetadata()
+    # Call the callable with a custom run_metadata.
+    callable_output = sess_callable(run_metadata=run_metadata)
+    # Verify that step_stats is populated in the custom run_metadata.
+    self.assertTrue(run_metadata.step_stats)
+    self.assertAllClose(np.array(42.0, dtype=np.float32), callable_output[0])
+
+    debug_dumps = wrapped_sess.observers["debug_dumps"]
+    self.assertEqual(1, len(debug_dumps))
+    debug_dump = debug_dumps[0]
+    node_names = [datum.node_name for datum in debug_dump.dumped_tensor_data]
+    self.assertItemsEqual(
+        ["callable_a", "callable_b", "variable_1", "variable_1/read"],
+        node_names)
 
   def testRuntimeErrorShouldBeCaught(self):
     wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
@@ -412,7 +539,7 @@ class LocalCLIDebugWrapperSessionTest(test_util.TensorFlowTestCase):
   def testRuntimeErrorBeforeGraphExecutionIsRaised(self):
     # Use an impossible device name to cause an error before graph execution.
     with ops.device("/device:GPU:1337"):
-      w = variables.Variable([1.0] * 10, name="w")
+      w = variables.VariableV1([1.0] * 10, name="w")
 
     wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
         [["run"]], self.sess, dump_root=self._tmp_dir)
@@ -705,12 +832,79 @@ class LocalCLIDebugWrapperSessionTest(test_util.TensorFlowTestCase):
     run_output = wrapped_sess.run([])
     self.assertEqual([], run_output)
 
+  def testDebuggingKerasFitWithSkippedRunsWorks(self):
+    wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
+        [["run"], ["run"], ["run", "-t", "10"]], self.sess)
+
+    backend.set_session(wrapped_sess)
+
+    model = sequential.Sequential()
+    model.add(core.Dense(4, input_shape=[2], activation="relu"))
+    model.add(core.Dense(1))
+    model.compile(loss="mse", optimizer="sgd")
+
+    x = np.zeros([8, 2])
+    y = np.zeros([8, 1])
+    model.fit(x, y, epochs=2)
+
+    self.assertEqual(2, len(wrapped_sess.observers["debug_dumps"]))
+
+  def testDebuggingKerasFitWithProfilingWorks(self):
+    wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
+        [["run", "-p"]] * 10, self.sess)
+
+    backend.set_session(wrapped_sess)
+
+    model = sequential.Sequential()
+    model.add(core.Dense(4, input_shape=[2], activation="relu"))
+    model.add(core.Dense(1))
+    model.compile(loss="mse", optimizer="sgd")
+
+    x = np.zeros([8, 2])
+    y = np.zeros([8, 1])
+    model.fit(x, y, epochs=2)
+
+    self.assertEqual(0, len(wrapped_sess.observers["debug_dumps"]))
+
   def testRunsWithEmptyNestedFetchWorks(self):
     wrapped_sess = LocalCLIDebuggerWrapperSessionForTest(
         [["run"]], self.sess, dump_root="")
 
     run_output = wrapped_sess.run({"foo": {"baz": []}, "bar": ()})
     self.assertEqual({"foo": {"baz": []}, "bar": ()}, run_output)
+
+  def testSessionRunHook(self):
+    a = array_ops.placeholder(dtypes.float32, [10])
+    b = a + 1
+    c = b * 2
+
+    class Hook(session_run_hook.SessionRunHook):
+
+      def before_run(self, _):
+        return session_run_hook.SessionRunArgs(fetches=c)
+
+    class Hook2(session_run_hook.SessionRunHook):
+
+      def before_run(self, _):
+        return session_run_hook.SessionRunArgs(fetches=b)
+
+    sess = session.Session()
+    sess = LocalCLIDebuggerWrapperSessionForTest([["run"], ["run"]], sess)
+
+    class SessionCreator(object):
+
+      def create_session(self):
+        return sess
+
+    final_sess = monitored_session.MonitoredSession(
+        session_creator=SessionCreator(), hooks=[Hook(), Hook2()])
+
+    final_sess.run(b, feed_dict={a: np.arange(10)})
+    debug_dumps = sess.observers["debug_dumps"]
+    self.assertEqual(1, len(debug_dumps))
+    debug_dump = debug_dumps[0]
+    node_names = [datum.node_name for datum in debug_dump.dumped_tensor_data]
+    self.assertIn(b.op.name, node_names)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 from tensorflow.python.eager import context
+from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import confusion_matrix
@@ -33,28 +34,25 @@ from tensorflow.python.util.deprecation import deprecated_argument_lookup
 from tensorflow.python.util.tf_export import tf_export
 
 
-@tf_export("losses.Reduction")
+@tf_export(v1=["losses.Reduction"])
 class Reduction(object):
   """Types of loss reduction.
 
   Contains the following values:
-  `NONE`: Un-reduced weighted losses with the same shape as input.
-  `SUM`: Scalar sum of weighted losses.
-  `MEAN`: Scalar `SUM` divided by sum of weights.
-  `SUM_OVER_BATCH_SIZE`: Scalar `SUM` divided by number of elements in losses.
-  `SUM_OVER_NONZERO_WEIGHTS`: Scalar `SUM` divided by number of non-zero
-     weights.
-  `SUM_BY_NONZERO_WEIGHTS`: Same as `SUM_OVER_NONZERO_WEIGHTS`.
+
+  * `NONE`: Un-reduced weighted losses with the same shape as input.
+  * `SUM`: Scalar sum of weighted losses.
+  * `MEAN`: Scalar `SUM` divided by sum of weights. DEPRECATED.
+  * `SUM_OVER_BATCH_SIZE`: Scalar `SUM` divided by number of elements in losses.
+  * `SUM_OVER_NONZERO_WEIGHTS`: Scalar `SUM` divided by number of non-zero
+     weights. DEPRECATED.
+  * `SUM_BY_NONZERO_WEIGHTS`: Same as `SUM_OVER_NONZERO_WEIGHTS`. DEPRECATED.
   """
 
   NONE = "none"
-
   SUM = "weighted_sum"
-
-  MEAN = "weighted_mean"
-
   SUM_OVER_BATCH_SIZE = "weighted_sum_over_batch_size"
-
+  MEAN = "weighted_mean"
   SUM_BY_NONZERO_WEIGHTS = "weighted_sum_by_nonzero_weights"
   SUM_OVER_NONZERO_WEIGHTS = SUM_BY_NONZERO_WEIGHTS
 
@@ -71,32 +69,7 @@ class Reduction(object):
   @classmethod
   def validate(cls, key):
     if key not in cls.all():
-      raise ValueError("Invalid ReductionKey %s." % key)
-
-
-def _safe_div(numerator, denominator, name="value"):
-  """Computes a safe divide which returns 0 if the denominator is zero.
-
-  Note that the function contains an additional conditional check that is
-  necessary for avoiding situations where the loss is zero causing NaNs to
-  creep into the gradient computation.
-
-  Args:
-    numerator: An arbitrary `Tensor`.
-    denominator: `Tensor` whose shape matches `numerator` and whose values are
-      assumed to be non-negative.
-    name: An optional name for the returned op.
-
-  Returns:
-    The element-wise value of the numerator divided by the denominator.
-  """
-  return array_ops.where(
-      math_ops.greater(denominator, 0),
-      math_ops.div(numerator, array_ops.where(
-          math_ops.equal(denominator, 0),
-          array_ops.ones_like(denominator), denominator)),
-      array_ops.zeros_like(numerator),
-      name=name)
+      raise ValueError("Invalid Reduction Key %s." % key)
 
 
 def _safe_mean(losses, num_present):
@@ -111,7 +84,7 @@ def _safe_mean(losses, num_present):
       then zero is returned.
   """
   total_loss = math_ops.reduce_sum(losses)
-  return _safe_div(total_loss, num_present)
+  return math_ops.div_no_nan(total_loss, num_present, name="value")
 
 
 def _num_present(losses, weights, per_batch=False):
@@ -141,7 +114,7 @@ def _num_present(losses, weights, per_batch=False):
        and not math_ops.equal(weights, 0.0))):
     return _num_elements(losses)
   with ops.name_scope(None, "num_present", (losses, weights)) as scope:
-    weights = math_ops.to_float(weights)
+    weights = math_ops.cast(weights, dtype=dtypes.float32)
     present = array_ops.where(
         math_ops.equal(weights, 0.0),
         array_ops.zeros_like(weights),
@@ -162,7 +135,7 @@ def _num_elements(losses):
     return math_ops.cast(array_ops.size(losses, name=scope), dtype=losses.dtype)
 
 
-@tf_export("losses.compute_weighted_loss")
+@tf_export(v1=["losses.compute_weighted_loss"])
 def compute_weighted_loss(
     losses, weights=1.0, scope=None, loss_collection=ops.GraphKeys.LOSSES,
     reduction=Reduction.SUM_BY_NONZERO_WEIGHTS):
@@ -190,22 +163,26 @@ def compute_weighted_loss(
     When calculating the gradient of a weighted loss contributions from
     both `losses` and `weights` are considered. If your `weights` depend
     on some model parameters but you do not want this to affect the loss
-    gradient, you need to apply @{tf.stop_gradient} to `weights` before
+    gradient, you need to apply `tf.stop_gradient` to `weights` before
     passing them to `compute_weighted_loss`.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   Reduction.validate(reduction)
   with ops.name_scope(scope, "weighted_loss", (losses, weights)):
     # Save the `reduction` argument for loss normalization when distributing
-    # to multiple towers.
-    # TODO(josh11b): Associate it with the returned op for more precision.
+    # to multiple replicas. Used only for estimator + v1 optimizer flow.
     ops.get_default_graph()._last_loss_reduction = reduction  # pylint: disable=protected-access
 
     with ops.control_dependencies((
         weights_broadcast_ops.assert_broadcastable(weights, losses),)):
       losses = ops.convert_to_tensor(losses)
       input_dtype = losses.dtype
-      losses = math_ops.to_float(losses)
-      weights = math_ops.to_float(weights)
+      losses = math_ops.cast(losses, dtype=dtypes.float32)
+      weights = math_ops.cast(weights, dtype=dtypes.float32)
       weighted_losses = math_ops.multiply(losses, weights)
       if reduction == Reduction.NONE:
         loss = weighted_losses
@@ -213,8 +190,7 @@ def compute_weighted_loss(
         loss = math_ops.reduce_sum(weighted_losses)
         if reduction == Reduction.MEAN:
           loss = _safe_mean(
-              loss,
-              math_ops.reduce_sum(array_ops.ones_like(losses) * weights))
+              loss, math_ops.reduce_sum(array_ops.ones_like(losses) * weights))
         elif (reduction == Reduction.SUM_BY_NONZERO_WEIGHTS or
               reduction == Reduction.SUM_OVER_NONZERO_WEIGHTS):
           loss = _safe_mean(loss, _num_present(losses, weights))
@@ -227,7 +203,7 @@ def compute_weighted_loss(
       return loss
 
 
-@tf_export("losses.absolute_difference")
+@tf_export(v1=["losses.absolute_difference"])
 def absolute_difference(
     labels, predictions, weights=1.0, scope=None,
     loss_collection=ops.GraphKeys.LOSSES,
@@ -260,6 +236,11 @@ def absolute_difference(
     ValueError: If the shape of `predictions` doesn't match that of
       `labels` or if the shape of `weights` is invalid or if `labels`
       or `predictions` is None.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   if labels is None:
     raise ValueError("labels must not be None.")
@@ -267,15 +248,15 @@ def absolute_difference(
     raise ValueError("predictions must not be None.")
   with ops.name_scope(scope, "absolute_difference",
                       (predictions, labels, weights)) as scope:
-    predictions = math_ops.to_float(predictions)
-    labels = math_ops.to_float(labels)
+    predictions = math_ops.cast(predictions, dtype=dtypes.float32)
+    labels = math_ops.cast(labels, dtype=dtypes.float32)
     predictions.get_shape().assert_is_compatible_with(labels.get_shape())
     losses = math_ops.abs(math_ops.subtract(predictions, labels))
     return compute_weighted_loss(
         losses, weights, scope, loss_collection, reduction=reduction)
 
 
-@tf_export("losses.cosine_distance")
+@tf_export(v1=["losses.cosine_distance"])
 @deprecated_args(None, "dim is deprecated, use axis instead", "dim")
 def cosine_distance(
     labels, predictions, axis=None, weights=1.0, scope=None,
@@ -306,6 +287,11 @@ def cosine_distance(
   Raises:
     ValueError: If `predictions` shape doesn't match `labels` shape, or
       `axis`, `labels`, `predictions` or `weights` is `None`.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   axis = deprecated_argument_lookup("axis", axis, "dim", dim)
   if axis is None:
@@ -316,8 +302,8 @@ def cosine_distance(
     raise ValueError("predictions must not be None.")
   with ops.name_scope(scope, "cosine_distance_loss",
                       (predictions, labels, weights)) as scope:
-    predictions = math_ops.to_float(predictions)
-    labels = math_ops.to_float(labels)
+    predictions = math_ops.cast(predictions, dtype=dtypes.float32)
+    labels = math_ops.cast(labels, dtype=dtypes.float32)
     predictions.get_shape().assert_is_compatible_with(labels.get_shape())
 
     radial_diffs = math_ops.multiply(predictions, labels)
@@ -326,7 +312,7 @@ def cosine_distance(
         losses, weights, scope, loss_collection, reduction=reduction)
 
 
-@tf_export("losses.hinge_loss")
+@tf_export(v1=["losses.hinge_loss"])
 def hinge_loss(labels, logits, weights=1.0, scope=None,
                loss_collection=ops.GraphKeys.LOSSES,
                reduction=Reduction.SUM_BY_NONZERO_WEIGHTS):
@@ -353,14 +339,19 @@ def hinge_loss(labels, logits, weights=1.0, scope=None,
   Raises:
     ValueError: If the shapes of `logits` and `labels` don't match or
       if `labels` or `logits` is None.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   if labels is None:
     raise ValueError("labels must not be None.")
   if logits is None:
     raise ValueError("logits must not be None.")
   with ops.name_scope(scope, "hinge_loss", (logits, labels, weights)) as scope:
-    logits = math_ops.to_float(logits)
-    labels = math_ops.to_float(labels)
+    logits = math_ops.cast(logits, dtype=dtypes.float32)
+    labels = math_ops.cast(labels, dtype=dtypes.float32)
     logits.get_shape().assert_is_compatible_with(labels.get_shape())
     # We first need to convert binary labels to -1/1 labels (as floats).
     all_ones = array_ops.ones_like(labels)
@@ -371,7 +362,7 @@ def hinge_loss(labels, logits, weights=1.0, scope=None,
         losses, weights, scope, loss_collection, reduction=reduction)
 
 
-@tf_export("losses.huber_loss")
+@tf_export(v1=["losses.huber_loss"])
 def huber_loss(labels, predictions, weights=1.0, delta=1.0, scope=None,
                loss_collection=ops.GraphKeys.LOSSES,
                reduction=Reduction.SUM_BY_NONZERO_WEIGHTS):
@@ -416,6 +407,11 @@ def huber_loss(labels, predictions, weights=1.0, delta=1.0, scope=None,
     ValueError: If the shape of `predictions` doesn't match that of `labels` or
       if the shape of `weights` is invalid.  Also if `labels` or
      `predictions` is None.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   if labels is None:
     raise ValueError("labels must not be None.")
@@ -423,8 +419,8 @@ def huber_loss(labels, predictions, weights=1.0, delta=1.0, scope=None,
     raise ValueError("predictions must not be None.")
   with ops.name_scope(scope, "huber_loss",
                       (predictions, labels, weights)) as scope:
-    predictions = math_ops.to_float(predictions)
-    labels = math_ops.to_float(labels)
+    predictions = math_ops.cast(predictions, dtype=dtypes.float32)
+    labels = math_ops.cast(labels, dtype=dtypes.float32)
     predictions.get_shape().assert_is_compatible_with(labels.get_shape())
     error = math_ops.subtract(predictions, labels)
     abs_error = math_ops.abs(error)
@@ -444,7 +440,7 @@ def huber_loss(labels, predictions, weights=1.0, delta=1.0, scope=None,
         losses, weights, scope, loss_collection, reduction=reduction)
 
 
-@tf_export("losses.log_loss")
+@tf_export(v1=["losses.log_loss"])
 def log_loss(labels, predictions, weights=1.0, epsilon=1e-7, scope=None,
              loss_collection=ops.GraphKeys.LOSSES,
              reduction=Reduction.SUM_BY_NONZERO_WEIGHTS):
@@ -477,6 +473,11 @@ def log_loss(labels, predictions, weights=1.0, epsilon=1e-7, scope=None,
     ValueError: If the shape of `predictions` doesn't match that of `labels` or
       if the shape of `weights` is invalid.  Also if `labels` or `predictions`
       is None.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   if labels is None:
     raise ValueError("labels must not be None.")
@@ -484,8 +485,8 @@ def log_loss(labels, predictions, weights=1.0, epsilon=1e-7, scope=None,
     raise ValueError("predictions must not be None.")
   with ops.name_scope(scope, "log_loss",
                       (predictions, labels, weights)) as scope:
-    predictions = math_ops.to_float(predictions)
-    labels = math_ops.to_float(labels)
+    predictions = math_ops.cast(predictions, dtype=dtypes.float32)
+    labels = math_ops.cast(labels, dtype=dtypes.float32)
     predictions.get_shape().assert_is_compatible_with(labels.get_shape())
     losses = -math_ops.multiply(
         labels,
@@ -496,7 +497,7 @@ def log_loss(labels, predictions, weights=1.0, epsilon=1e-7, scope=None,
 
 
 # TODO(b/37208492): Add reduction arg.
-@tf_export("losses.mean_pairwise_squared_error")
+@tf_export(v1=["losses.mean_pairwise_squared_error"])
 def mean_pairwise_squared_error(
     labels, predictions, weights=1.0, scope=None,
     loss_collection=ops.GraphKeys.LOSSES):
@@ -540,6 +541,11 @@ def mean_pairwise_squared_error(
     ValueError: If the shape of `predictions` doesn't match that of `labels` or
       if the shape of `weights` is invalid.  Also if `labels` or `predictions`
       is None.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   if labels is None:
     raise ValueError("labels must not be None.")
@@ -547,31 +553,33 @@ def mean_pairwise_squared_error(
     raise ValueError("predictions must not be None.")
   with ops.name_scope(scope, "mean_pairwise_squared_error",
                       (predictions, labels, weights)) as scope:
-    weights = math_ops.to_float(weights)
-    labels = math_ops.to_float(labels)
+    weights = math_ops.cast(weights, dtype=dtypes.float32)
+    labels = math_ops.cast(labels, dtype=dtypes.float32)
     with ops.control_dependencies((
         weights_broadcast_ops.assert_broadcastable(weights, labels),)):
-      predictions = math_ops.to_float(predictions)
+      predictions = math_ops.cast(predictions, dtype=dtypes.float32)
       predictions.get_shape().assert_is_compatible_with(labels.get_shape())
 
       diffs = math_ops.subtract(predictions, labels)
 
-      reduction_indices = math_ops.range(1, array_ops.rank(diffs))
+      axis = math_ops.range(1, array_ops.rank(diffs))
 
       sum_squares_diff_per_batch = math_ops.reduce_sum(
-          math_ops.square(diffs),
-          reduction_indices=reduction_indices,
-          keepdims=True)
+          math_ops.square(diffs), axis=axis, keepdims=True)
       num_present_per_batch = _num_present(diffs, weights, per_batch=True)
 
-      term1 = 2.0 * _safe_div(sum_squares_diff_per_batch,
-                              num_present_per_batch - 1)
+      term1 = 2.0 * math_ops.div_no_nan(
+          sum_squares_diff_per_batch,
+          math_ops.maximum(num_present_per_batch - 1, 0),
+          name="value")
 
-      sum_diff = math_ops.reduce_sum(
-          diffs, reduction_indices=reduction_indices, keepdims=True)
-      term2 = 2.0 * _safe_div(
+      sum_diff = math_ops.reduce_sum(diffs, axis=axis, keepdims=True)
+      term2 = 2.0 * math_ops.div_no_nan(
           math_ops.square(sum_diff),
-          math_ops.multiply(num_present_per_batch, num_present_per_batch - 1))
+          math_ops.maximum(
+              math_ops.multiply(num_present_per_batch,
+                                num_present_per_batch - 1), 0),
+          name="value")
 
       weighted_losses = math_ops.multiply(term1 - term2, weights)
       loss = math_ops.reduce_sum(weighted_losses)
@@ -585,7 +593,7 @@ def mean_pairwise_squared_error(
       return mean_loss
 
 
-@tf_export("losses.mean_squared_error")
+@tf_export(v1=["losses.mean_squared_error"])
 def mean_squared_error(
     labels, predictions, weights=1.0, scope=None,
     loss_collection=ops.GraphKeys.LOSSES,
@@ -618,6 +626,11 @@ def mean_squared_error(
     ValueError: If the shape of `predictions` doesn't match that of `labels` or
       if the shape of `weights` is invalid.  Also if `labels` or `predictions`
       is None.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   if labels is None:
     raise ValueError("labels must not be None.")
@@ -625,15 +638,15 @@ def mean_squared_error(
     raise ValueError("predictions must not be None.")
   with ops.name_scope(scope, "mean_squared_error",
                       (predictions, labels, weights)) as scope:
-    predictions = math_ops.to_float(predictions)
-    labels = math_ops.to_float(labels)
+    predictions = math_ops.cast(predictions, dtype=dtypes.float32)
+    labels = math_ops.cast(labels, dtype=dtypes.float32)
     predictions.get_shape().assert_is_compatible_with(labels.get_shape())
     losses = math_ops.squared_difference(predictions, labels)
     return compute_weighted_loss(
         losses, weights, scope, loss_collection, reduction=reduction)
 
 
-@tf_export("losses.sigmoid_cross_entropy")
+@tf_export(v1=["losses.sigmoid_cross_entropy"])
 def sigmoid_cross_entropy(
     multi_class_labels, logits, weights=1.0, label_smoothing=0, scope=None,
     loss_collection=ops.GraphKeys.LOSSES,
@@ -670,6 +683,11 @@ def sigmoid_cross_entropy(
     ValueError: If the shape of `logits` doesn't match that of
       `multi_class_labels` or if the shape of `weights` is invalid, or if
       `weights` is None.  Also if `multi_class_labels` or `logits` is None.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   if multi_class_labels is None:
     raise ValueError("multi_class_labels must not be None.")
@@ -692,7 +710,7 @@ def sigmoid_cross_entropy(
         losses, weights, scope, loss_collection, reduction=reduction)
 
 
-@tf_export("losses.softmax_cross_entropy")
+@tf_export(v1=["losses.softmax_cross_entropy"])
 def softmax_cross_entropy(
     onehot_labels, logits, weights=1.0, label_smoothing=0, scope=None,
     loss_collection=ops.GraphKeys.LOSSES,
@@ -731,6 +749,11 @@ def softmax_cross_entropy(
     ValueError: If the shape of `logits` doesn't match that of `onehot_labels`
       or if the shape of `weights` is invalid or if `weights` is None.  Also if
       `onehot_labels` or `logits` is None.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   if onehot_labels is None:
     raise ValueError("onehot_labels must not be None.")
@@ -744,7 +767,7 @@ def softmax_cross_entropy(
 
     if label_smoothing > 0:
       num_classes = math_ops.cast(
-          array_ops.shape(onehot_labels)[1], logits.dtype)
+          array_ops.shape(onehot_labels)[-1], logits.dtype)
       smooth_positives = 1.0 - label_smoothing
       smooth_negatives = label_smoothing / num_classes
       onehot_labels = onehot_labels * smooth_positives + smooth_negatives
@@ -809,7 +832,7 @@ def _remove_squeezable_dimensions(
   return labels, predictions, weights
 
 
-@tf_export("losses.sparse_softmax_cross_entropy")
+@tf_export(v1=["losses.sparse_softmax_cross_entropy"])
 def sparse_softmax_cross_entropy(
     labels, logits, weights=1.0, scope=None,
     loss_collection=ops.GraphKeys.LOSSES,
@@ -828,7 +851,8 @@ def sparse_softmax_cross_entropy(
       exception when this op is run on CPU, and return `NaN` for corresponding
       loss and gradient rows on GPU.
     logits: Unscaled log probabilities of shape
-      `[d_0, d_1, ..., d_{r-1}, num_classes]` and dtype `float32` or `float64`.
+      `[d_0, d_1, ..., d_{r-1}, num_classes]` and dtype `float16`, `float32` or
+      `float64`.
     weights: Coefficients for the loss. This must be scalar or broadcastable to
       `labels` (i.e. same rank and each dimension is either 1 or the same).
     scope: the scope for the operations performed in computing the loss.
@@ -842,6 +866,11 @@ def sparse_softmax_cross_entropy(
   Raises:
     ValueError: If the shapes of `logits`, `labels`, and `weights` are
       incompatible, or if any of them are None.
+
+  @compatibility(eager)
+  The `loss_collection` argument is ignored when executing eagerly. Consider
+  holding on to the return value or collecting losses via a `tf.keras.Model`.
+  @end_compatibility
   """
   if labels is None:
     raise ValueError("labels must not be None.")
