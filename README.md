@@ -20,7 +20,11 @@ cmake .. -A Win32 -T v141_xp -G "Visual Studio 15 2017" -Dtensorflow_ENABLE_GRPC
 ```
 - Cmake run for 64 bit
 ```
-cmake .. -A x64 -T x64 -G "Visual Studio 16 2019" -Dtensorflow_ENABLE_GRPC_SUPPORT=OFF -Dtensorflow_BUILD_CC_EXAMPLE=OFF -DCMAKE_BUILD_TYPE=Release -Dtensorflow_BUILD_PYTHON_BINDINGS=OFF -Dtensorflow_BUILD_ALL_KERNELS=ON -Dtensorflow_BUILD_SHARED_LIB=ON 
+cmake .. -A x64 -G "Visual Studio 16 2019" -Dtensorflow_ENABLE_GRPC_SUPPORT=OFF -Dtensorflow_BUILD_CC_EXAMPLE=OFF -DCMAKE_BUILD_TYPE=Release -Dtensorflow_BUILD_PYTHON_BINDINGS=OFF -Dtensorflow_BUILD_ALL_KERNELS=ON -Dtensorflow_BUILD_SHARED_LIB=ON 
+
+OR
+
+ cmake .. -A x64 -G "Visual Studio 16 2019" -Dtensorflow_ENABLE_GRPC_SUPPORT=ON -Dtensorflow_BUILD_CC_EXAMPLE=OFF -DCMAKE_BUILD_TYPE=Release -Dtensorflow_BUILD_PYTHON_BINDINGS=OFF -Dtensorflow_BUILD_ALL_KERNELS=ON -Dtensorflow_BUILD_SHARED_LIB=ON -DCMAKE_INSTALL_PREFIX=install -DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=10.0.16299.91
 ```
 
 - Change build environment to x64_x86 to not get Heap memory error
