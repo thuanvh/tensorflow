@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <string>
 #include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/protobuf/config.pb.h"
 
 namespace tensorflow {
@@ -25,7 +26,7 @@ namespace tensorflow {
 class Env;
 
 /// Configuration information for a Session.
-struct SessionOptions {
+TF_EXPORT struct SessionOptions {
   /// The environment to use.
   Env* env;
 
@@ -57,7 +58,7 @@ struct SessionOptions {
   /// Configuration options.
   ConfigProto config;
 
-  SessionOptions();
+  TF_EXPORT SessionOptions();
 };
 
 }  // end namespace tensorflow
